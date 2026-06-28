@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phone-mcp-server"
+version = "0.1.0"
+description = "MCP + HTTP server for controlling Android phones — works with Claude, Codex, GPT, Gemini, and any agent framework"
+readme = "README.md"
+license = "AGPL-3.0-only"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=1.0",
+    "starlette>=0.27",
+    "uvicorn>=0.20",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+appium = [
+    "Appium-Python-Client>=3.0",
+]
+
+[project.scripts]
+phone-mcp = "mcp_server:mcp.run"
+phone-http = "http_server:main"
