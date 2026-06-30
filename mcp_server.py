@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from typing import Annotated, Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
@@ -45,28 +46,31 @@ mcp = FastMCP(
 # ── Backend lifecycle ──────────────────────────────────────────────
 
 _backend: Optional[PhoneBackend] = None
+_backend_lock = threading.Lock()
 
 
 def _get_backend() -> PhoneBackend:
     global _backend
-    if _backend is not None:
+    with _backend_lock:
+        if _backend is not None:
+            return _backend
+
+        backend_name = os.environ.get("HERMES_PHONE_BACKEND", "adb").lower()
+
+        if backend_name == "adb":
+            from phone_control.adb_backend import AdbBackend
+            backend: PhoneBackend = AdbBackend(serial=os.environ.get("ANDROID_SERIAL"))
+        elif backend_name in ("hybrid", "appium"):
+            from phone_control.appium_backend import HybridBackend
+            backend = HybridBackend(serial=os.environ.get("ANDROID_SERIAL"))
+        elif backend_name == "noop":
+            backend = _NoopBackend()
+        else:
+            raise RuntimeError(f"Unknown HERMES_PHONE_BACKEND={backend_name!r}")
+
+        backend.start()
+        _backend = backend
         return _backend
-
-    backend_name = os.environ.get("HERMES_PHONE_BACKEND", "adb").lower()
-
-    if backend_name == "adb":
-        from phone_control.adb_backend import AdbBackend
-        _backend = AdbBackend(serial=os.environ.get("ANDROID_SERIAL"))
-    elif backend_name in ("hybrid", "appium"):
-        from phone_control.appium_backend import HybridBackend
-        _backend = HybridBackend(serial=os.environ.get("ANDROID_SERIAL"))
-    elif backend_name == "noop":
-        _backend = _NoopBackend()
-    else:
-        raise RuntimeError(f"Unknown HERMES_PHONE_BACKEND={backend_name!r}")
-
-    _backend.start()
-    return _backend
 
 
 class _NoopBackend(PhoneBackend):

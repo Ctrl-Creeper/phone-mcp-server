@@ -23,9 +23,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
+import sys
+import threading
 from typing import Any, Dict, List, Optional
 
 from starlette.applications import Starlette
+from starlette.middleware import Middleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -40,31 +45,73 @@ from phone_control.policy import get_policy
 
 logger = logging.getLogger("phone-http")
 
+# ── Auth ───────────────────────────────────────────────────────────
+
+# API token required on all endpoints except /health.
+# Set via PHONE_API_TOKEN env var, or auto-generated at startup.
+_API_TOKEN: Optional[str] = None
+
+# Endpoints that don't require auth (liveness check only).
+_PUBLIC_PATHS = frozenset({"/health"})
+
+
+def _get_api_token() -> str:
+    global _API_TOKEN
+    if _API_TOKEN is None:
+        _API_TOKEN = os.environ.get("PHONE_API_TOKEN") or secrets.token_urlsafe(32)
+    return _API_TOKEN
+
+
+class BearerAuthMiddleware(BaseHTTPMiddleware):
+    """Require Authorization: Bearer <token> on all endpoints except /health."""
+
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path in _PUBLIC_PATHS:
+            return await call_next(request)
+
+        header = request.headers.get("authorization", "")
+        if not header.startswith("Bearer "):
+            return JSONResponse(
+                {"error": "missing Authorization: Bearer <token> header"},
+                status_code=401,
+            )
+        provided = header[len("Bearer "):].strip()
+        expected = _get_api_token()
+        # Constant-time comparison to avoid timing attacks.
+        if not secrets.compare_digest(provided, expected):
+            return JSONResponse({"error": "invalid token"}, status_code=403)
+
+        return await call_next(request)
+
+
 # ── Backend lifecycle ──────────────────────────────────────────────
 
 _backend: Optional[PhoneBackend] = None
+_backend_lock = threading.Lock()
 
 
 def _get_backend() -> PhoneBackend:
     global _backend
-    if _backend is not None:
+    with _backend_lock:
+        if _backend is not None:
+            return _backend
+
+        backend_name = os.environ.get("HERMES_PHONE_BACKEND", "adb").lower()
+
+        if backend_name == "adb":
+            from phone_control.adb_backend import AdbBackend
+            backend: PhoneBackend = AdbBackend(serial=os.environ.get("ANDROID_SERIAL"))
+        elif backend_name in ("hybrid", "appium"):
+            from phone_control.appium_backend import HybridBackend
+            backend = HybridBackend(serial=os.environ.get("ANDROID_SERIAL"))
+        elif backend_name == "noop":
+            backend = _NoopBackend()
+        else:
+            raise RuntimeError(f"Unknown HERMES_PHONE_BACKEND={backend_name!r}")
+
+        backend.start()
+        _backend = backend
         return _backend
-
-    backend_name = os.environ.get("HERMES_PHONE_BACKEND", "adb").lower()
-
-    if backend_name == "adb":
-        from phone_control.adb_backend import AdbBackend
-        _backend = AdbBackend(serial=os.environ.get("ANDROID_SERIAL"))
-    elif backend_name in ("hybrid", "appium"):
-        from phone_control.appium_backend import HybridBackend
-        _backend = HybridBackend(serial=os.environ.get("ANDROID_SERIAL"))
-    elif backend_name == "noop":
-        _backend = _NoopBackend()
-    else:
-        raise RuntimeError(f"Unknown HERMES_PHONE_BACKEND={backend_name!r}")
-
-    _backend.start()
-    return _backend
 
 
 class _NoopBackend(PhoneBackend):
@@ -123,14 +170,26 @@ def _policy_check(action: str, package: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-def _resolve_package(backend: PhoneBackend, explicit_pkg: str) -> str:
-    if explicit_pkg: return explicit_pkg
-    try: return backend.current_app().get("package", "")
-    except Exception: return ""
+def _resolve_target_package(
+    backend: PhoneBackend, action: str, body: Dict[str, Any],
+) -> str:
+    """Resolve the package to check against the policy.
+
+    For launch_app/stop_app, the explicit 'package' arg is the target.
+    For all other non-safe actions, use the foreground app — agent-supplied
+    'package' is IGNORED to prevent policy bypass.
+    """
+    if action in _PACKAGE_AWARE_ACTIONS:
+        return body.get("package", "")
+    try:
+        return backend.current_app().get("package", "")
+    except Exception:
+        return ""
 
 
 _SAFE_ACTIONS = frozenset({"capture", "wait", "list_apps", "current_app", "device_info"})
 _DANGEROUS_ACTIONS = frozenset({"install_apk", "shell"})
+_PACKAGE_AWARE_ACTIONS = frozenset({"launch_app", "stop_app"})
 
 
 # ── Dispatch ───────────────────────────────────────────────────────
@@ -140,7 +199,7 @@ def _dispatch(backend: PhoneBackend, action: str, body: Dict[str, Any]) -> Dict[
         return {"error": f"'{action}' is not allowed via HTTP API for security reasons"}
 
     if action not in _SAFE_ACTIONS:
-        pkg = _resolve_package(backend, body.get("package", ""))
+        pkg = _resolve_target_package(backend, action, body)
         blocked = _policy_check(action, pkg)
         if blocked: return blocked
 
@@ -400,13 +459,39 @@ async def handle_health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "server": "phone-control"})
 
 
-app = Starlette(routes=[
-    Route("/health", handle_health, methods=["GET"]),
-    Route("/phone/status", handle_status, methods=["GET"]),
-    Route("/phone/{action}", handle_phone_action, methods=["POST"]),
-    Route("/openai/tools", handle_openai_tools, methods=["GET"]),
-    Route("/openai/call", handle_openai_call, methods=["POST"]),
-])
+app = Starlette(
+    routes=[
+        Route("/health", handle_health, methods=["GET"]),
+        Route("/phone/status", handle_status, methods=["GET"]),
+        Route("/phone/{action}", handle_phone_action, methods=["POST"]),
+        Route("/openai/tools", handle_openai_tools, methods=["GET"]),
+        Route("/openai/call", handle_openai_call, methods=["POST"]),
+    ],
+    middleware=[Middleware(BearerAuthMiddleware)],
+)
+
+
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _validate_bind_host(host: str, allow_public: bool) -> None:
+    if host in _LOOPBACK_HOSTS:
+        return
+    if not allow_public:
+        sys.stderr.write(
+            f"ERROR: refusing to bind to non-loopback host {host!r} without "
+            f"--allow-public.\n"
+            f"This server has only a bearer-token auth boundary. Exposing it "
+            f"to the network is dangerous.\n"
+            f"If you really mean it, pass --allow-public and ensure the "
+            f"PHONE_API_TOKEN is strong and confidential.\n"
+        )
+        sys.exit(2)
+    sys.stderr.write(
+        f"WARNING: binding to {host!r} — phone control API is reachable from "
+        f"the network. Token-only protection is in effect; rotate the token "
+        f"immediately if leaked.\n"
+    )
 
 
 if __name__ == "__main__":
@@ -414,10 +499,28 @@ if __name__ == "__main__":
     import uvicorn
 
     parser = argparse.ArgumentParser(description="Phone Control HTTP Server")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=int(os.environ.get("PHONE_HTTP_PORT", "8080")))
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="Bind address (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int,
+                        default=int(os.environ.get("PHONE_HTTP_PORT", "8080")))
+    parser.add_argument("--allow-public", action="store_true",
+                        help="Allow binding to non-loopback addresses (dangerous)")
     args = parser.parse_args()
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-    logger.info("Phone control HTTP server starting on %s:%d", args.host, args.port)
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+    _validate_bind_host(args.host, args.allow_public)
+
+    token = _get_api_token()
+    token_source = "PHONE_API_TOKEN env var" if os.environ.get("PHONE_API_TOKEN") else "auto-generated"
+    sys.stderr.write(
+        "\n──────────────────────────────────────────────────────────────\n"
+        f"Phone Control HTTP Server — {args.host}:{args.port}\n"
+        f"API token ({token_source}):\n  {token}\n"
+        "Include in every request:  Authorization: Bearer <token>\n"
+        "──────────────────────────────────────────────────────────────\n\n"
+    )
+    sys.stderr.flush()
+
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
