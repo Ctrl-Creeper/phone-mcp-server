@@ -1,67 +1,67 @@
 # phone-mcp-server
 
-English | [中文](README_CN.md)
+[English](README.md) | 中文
 
-Standalone MCP + HTTP server for controlling Android phones from **any** AI agent.
+独立的 MCP + HTTP 服务器，让**任何** AI Agent 都能控制 Android 手机。
 
-Works with Claude Desktop, Claude Code, OpenAI Codex CLI, GPT agents (via OpenAI API), Gemini, LangChain, AutoGen, CrewAI, Open Interpreter, or any HTTP client.
+支持 Claude Desktop、Claude Code、OpenAI Codex CLI、GPT（通过 OpenAI API）、Gemini、LangChain、AutoGen、CrewAI、Open Interpreter，以及任何 HTTP 客户端。
 
-## How It Works
+## 工作原理
 
 ```
 ┌──────────────────────────────────────────────────┐
-│  Any AI Agent                                    │
+│  任意 AI Agent                                   │
 │                                                  │
 │  Claude ──── MCP (stdio) ──┐                     │
 │  Codex ──── MCP (stdio) ───┤                     │
 │                            ▼                     │
 │                     ┌──────────────┐             │
-│                     │  MCP Server  │             │
+│                     │  MCP 服务器   │             │
 │                     │  mcp_server  │             │
 │                     └──────┬───────┘             │
 │                            │                     │
 │  GPT ──── HTTP ────┐       │                     │
 │  Gemini ── HTTP ───┤       │                     │
-│  Custom ── HTTP ───┤       │                     │
+│  自定义 ── HTTP ───┤       │                     │
 │                    ▼       ▼                     │
 │              ┌─────────────────┐                 │
 │              │  phone_control  │                 │
-│              │  (core package) │                 │
+│              │  (核心包)        │                 │
 │              └────────┬────────┘                 │
 │                       │                          │
-│              ADB  ────┤──── Appium (optional)    │
+│              ADB  ────┤──── Appium (可选)         │
 │                       │                          │
 ├───────────────────────┼──────────────────────────┤
-│  Android Emulator     │                          │
+│  Android 模拟器        │                          │
 └───────────────────────┴──────────────────────────┘
 ```
 
-## Requirements
+## 环境要求
 
 - Python 3.10+
-- Android SDK Platform Tools (`adb` on PATH)
-- A running Android emulator or device
+- Android SDK Platform Tools（`adb` 在 PATH 中）
+- 正在运行的 Android 模拟器或真机
 
-**Optional** (for Unicode text input and WebView support):
-- [Appium](https://appium.io/) (`npm install -g appium`)
-- Appium Python client (`pip install Appium-Python-Client`)
+**可选**（Unicode 文本输入和 WebView 支持）：
+- [Appium](https://appium.io/)（`npm install -g appium`）
+- Appium Python 客户端（`pip install Appium-Python-Client`）
 
-## Install
+## 安装
 
 ```bash
 git clone https://github.com/Ctrl-Creeper/phone-mcp-server.git
 cd phone-mcp-server
 pip install .
 
-# With Appium support
+# 安装 Appium 支持
 pip install ".[appium]"
 ```
 
-## Quick Start
+## 快速开始
 
 ### Claude Desktop
 
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
+添加到 `~/Library/Application Support/Claude/claude_desktop_config.json`：
 
 ```json
 {
@@ -86,7 +86,7 @@ claude mcp add phone-control python /path/to/phone-mcp-server/mcp_server.py
 codex --mcp-config codex-mcp.json
 ```
 
-Create `codex-mcp.json`:
+创建 `codex-mcp.json`：
 
 ```json
 {
@@ -99,9 +99,9 @@ Create `codex-mcp.json`:
 }
 ```
 
-### OpenAI API / GPT Agents
+### OpenAI API / GPT Agent
 
-Start the HTTP server, then fetch the tool schema:
+启动 HTTP 服务器，然后获取工具 schema：
 
 ```bash
 python http_server.py
@@ -114,7 +114,7 @@ tools = requests.get("http://localhost:8080/openai/tools").json()
 
 response = openai.chat.completions.create(
     model="gpt-4o",
-    messages=[{"role": "user", "content": "Open Settings on the phone"}],
+    messages=[{"role": "user", "content": "打开手机设置"}],
     tools=tools,
 )
 
@@ -132,7 +132,7 @@ import requests, google.generativeai as genai
 
 tools_schema = requests.get("http://localhost:8080/openai/tools").json()
 
-# Convert to Gemini format
+# 转换为 Gemini 格式
 gemini_tools = []
 for t in tools_schema:
     f = t["function"]
@@ -146,9 +146,9 @@ for t in tools_schema:
 
 model = genai.GenerativeModel("gemini-2.0-flash", tools=gemini_tools)
 chat = model.start_chat()
-response = chat.send_message("Open the camera app")
+response = chat.send_message("打开相机应用")
 
-# Execute the function call
+# 执行函数调用
 fc = response.candidates[0].content.parts[0].function_call
 result = requests.post("http://localhost:8080/openai/call", json={
     "name": fc.name,
@@ -165,74 +165,74 @@ from langchain_core.tools import StructuredTool
 def phone_action(action: str, **kwargs):
     return requests.post(f"http://localhost:8080/phone/{action}", json=kwargs).json()
 
-# Or dynamically load from schema
+# 或从 schema 动态加载
 tools_schema = requests.get("http://localhost:8080/openai/tools").json()
 ```
 
-### Any HTTP Client (curl)
+### 任意 HTTP 客户端 (curl)
 
 ```bash
-# Capture UI hierarchy
+# 获取 UI 层级树
 curl -s localhost:8080/phone/capture -d '{"mode":"hierarchy"}' | jq .
 
-# Tap element #3
+# 点击第 3 个元素
 curl -s localhost:8080/phone/tap -d '{"element":3}' | jq .
 
-# Type text
-curl -s localhost:8080/phone/type -d '{"text":"hello world"}' | jq .
+# 输入文本
+curl -s localhost:8080/phone/type -d '{"text":"你好世界"}' | jq .
 
-# Get device info
+# 获取设备信息
 curl -s -X POST localhost:8080/phone/device_info | jq .
 
-# Fetch OpenAI tool schema
+# 获取 OpenAI 工具 schema
 curl -s localhost:8080/openai/tools | jq .
 ```
 
-## Exposed Tools (15)
+## 提供的工具 (15 个)
 
-| Tool | Description |
-|------|-------------|
-| `phone_capture` | Capture screen (hierarchy / screenshot / both) |
-| `phone_tap` | Tap by element index or coordinates |
-| `phone_double_tap` | Double-tap |
-| `phone_long_press` | Long-press (configurable duration) |
-| `phone_swipe` | Swipe by direction or coordinates |
-| `phone_type` | Type text (Unicode via Appium hybrid) |
-| `phone_clear_text` | Clear text field |
-| `phone_set_text` | Clear + type new text |
-| `phone_keyevent` | Send key event (BACK, HOME, ENTER, etc.) |
-| `phone_launch_app` | Launch app by package name |
-| `phone_stop_app` | Force-stop app |
-| `phone_list_apps` | List installed apps |
-| `phone_current_app` | Get foreground app |
-| `phone_device_info` | Device model, screen size, Android version |
-| `phone_wait` | Wait N seconds |
+| 工具 | 说明 |
+|------|------|
+| `phone_capture` | 捕获屏幕（层级树 / 截图 / 两者） |
+| `phone_tap` | 通过元素索引或坐标点击 |
+| `phone_double_tap` | 双击 |
+| `phone_long_press` | 长按（可配置时长） |
+| `phone_swipe` | 通过方向或坐标滑动 |
+| `phone_type` | 输入文本（混合后端支持 Unicode） |
+| `phone_clear_text` | 清空文本框 |
+| `phone_set_text` | 清空并输入新文本 |
+| `phone_keyevent` | 发送按键事件（BACK、HOME、ENTER 等） |
+| `phone_launch_app` | 通过包名启动应用 |
+| `phone_stop_app` | 强制停止应用 |
+| `phone_list_apps` | 列出已安装应用 |
+| `phone_current_app` | 获取前台应用 |
+| `phone_device_info` | 设备型号、屏幕大小、Android 版本 |
+| `phone_wait` | 等待 N 秒 |
 
-## Configuration
+## 配置
 
-| Environment Variable | Description | Default |
-|---------------------|-------------|---------|
-| `HERMES_PHONE_BACKEND` | `adb`, `hybrid`, or `noop` | `adb` |
-| `ANDROID_SERIAL` | Device serial (auto-detected if one device) | — |
-| `APPIUM_PORT` | Appium server port (hybrid backend) | `4723` |
-| `PHONE_POLICY_PATH` | Path to phone-policy.yaml | auto-search |
-| `MCP_SERVER_PORT` | MCP SSE server port | `8765` |
-| `PHONE_HTTP_PORT` | HTTP server port | `8080` |
+| 环境变量 | 说明 | 默认值 |
+|---------|------|--------|
+| `HERMES_PHONE_BACKEND` | `adb`、`hybrid` 或 `noop` | `adb` |
+| `ANDROID_SERIAL` | 设备序列号（仅一台设备时自动检测） | — |
+| `APPIUM_PORT` | Appium 服务器端口（混合后端） | `4723` |
+| `PHONE_POLICY_PATH` | phone-policy.yaml 路径 | 自动搜索 |
+| `MCP_SERVER_PORT` | MCP SSE 服务器端口 | `8765` |
+| `PHONE_HTTP_PORT` | HTTP 服务器端口 | `8080` |
 
-## Policy Engine
+## 策略引擎
 
-The phone policy (`phone-policy.yaml`) controls what actions the agent can perform on which apps. Place it at `~/.hermes/phone-policy.yaml` or set `PHONE_POLICY_PATH`.
+手机策略（`phone-policy.yaml`）控制 Agent 可以在哪些应用上执行哪些操作。将文件放在 `~/.hermes/phone-policy.yaml` 或通过 `PHONE_POLICY_PATH` 指定路径。
 
-See the [virtual-phone-agent](https://github.com/Ctrl-Creeper/virtual-phone-agent) repo for the full policy reference and examples.
+完整策略参考和示例见 [virtual-phone-agent](https://github.com/Ctrl-Creeper/virtual-phone-agent) 仓库。
 
-## Security
+## 安全
 
-- All ADB commands use argument-list subprocess (no shell injection)
-- `install_apk` and `shell` are blocked over HTTP API
-- Policy engine enforces per-app action restrictions
-- Phone content is untrusted data — never treated as instructions
-- Input sanitization: shell metachar rejection, keycode allowlist, coordinate bounds, text length limits
+- 所有 ADB 命令使用参数列表方式调用 subprocess（无 shell 注入）
+- `install_apk` 和 `shell` 在 HTTP API 中被禁止
+- 策略引擎强制执行按应用的操作限制
+- 手机内容是不可信数据 — 永远不会被当作指令
+- 输入清洗：shell 元字符拒绝、按键码白名单、坐标边界检查、文本长度限制
 
-## License
+## 许可证
 
 AGPL-3.0
