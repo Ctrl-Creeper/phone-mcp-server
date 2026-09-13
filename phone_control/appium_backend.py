@@ -20,7 +20,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from phone_control.adb_backend import AdbBackend
+from .adb_backend import AdbBackend
 from phone_control.backend import (
     ActionResult,
     CaptureResult,

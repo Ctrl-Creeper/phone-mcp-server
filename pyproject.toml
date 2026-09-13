@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phone-mcp-server"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP + HTTP server for controlling Android phones — works with Claude, Codex, GPT, Gemini, and any agent framework"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -25,3 +25,9 @@ appium = [
 [project.scripts]
 phone-mcp = "mcp_server:mcp.run"
 phone-http = "http_server:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.setuptools.package-data]
+phone_control = ["phone_ocr.swift"]

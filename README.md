@@ -46,6 +46,10 @@ Works with Claude Desktop, Claude Code, OpenAI Codex CLI, GPT agents (via OpenAI
 - [Appium](https://appium.io/) (`npm install -g appium`)
 - Appium Python client (`pip install Appium-Python-Client`)
 
+**Optional (for apps with an empty accessibility tree):**
+- macOS 13+ and Xcode Command Line Tools. Build the local Vision OCR helper:
+  `mkdir -p ~/.phone-mcp/bin && swiftc phone_control/phone_ocr.swift -o ~/.phone-mcp/bin/phone-ocr -framework Vision -framework ImageIO`
+
 ## Install
 
 ```bash
@@ -55,6 +59,9 @@ pip install .
 
 # With Appium support
 pip install ".[appium]"
+
+# Optional: install the helper APK for secure Unicode/special-character input
+adb install -r helper-apk/releases/phone-agent-helper.apk
 ```
 
 ## Quick Start
@@ -188,7 +195,7 @@ curl -s -X POST localhost:8080/phone/device_info | jq .
 curl -s localhost:8080/openai/tools | jq .
 ```
 
-## Exposed Tools (15)
+## Exposed Tools (18)
 
 | Tool | Description |
 |------|-------------|
@@ -207,6 +214,15 @@ curl -s localhost:8080/openai/tools | jq .
 | `phone_current_app` | Get foreground app |
 | `phone_device_info` | Device model, screen size, Android version |
 | `phone_wait` | Wait N seconds |
+| `phone_wechat_open_chat` | Find and open a WeChat conversation by title with OCR search and 80% matching |
+| `phone_wechat_reply` | Reply to a verified WeChat conversation with delivery confirmation and bounded recovery |
+| `phone_wechat_collect_context` | Scroll, OCR, deduplicate, and collect bounded WeChat history |
+
+The WeChat tools do not depend on a fixed list position. They search when the
+conversation is not visible, ignore volatile member-count suffixes, verify the
+opened title and input area, and recover conservatively after transient UI failures.
+`phone_capture(mode="hierarchy")` automatically falls back to local OCR when an
+app exposes no usable accessibility nodes.
 
 ## Configuration
 

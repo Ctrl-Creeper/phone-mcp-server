@@ -46,6 +46,10 @@
 - [Appium](https://appium.io/)（`npm install -g appium`）
 - Appium Python 客户端（`pip install Appium-Python-Client`）
 
+**可选（适用于无障碍树为空的应用）：**
+- macOS 13+ 和 Xcode Command Line Tools。编译本地 Vision OCR：
+  `mkdir -p ~/.phone-mcp/bin && swiftc phone_control/phone_ocr.swift -o ~/.phone-mcp/bin/phone-ocr -framework Vision -framework ImageIO`
+
 ## 安装
 
 ```bash
@@ -55,6 +59,9 @@ pip install .
 
 # 安装 Appium 支持
 pip install ".[appium]"
+
+# 可选：安装 helper APK，以支持安全的 Unicode/特殊字符输入
+adb install -r helper-apk/releases/phone-agent-helper.apk
 ```
 
 ## 快速开始
@@ -188,7 +195,7 @@ curl -s -X POST localhost:8080/phone/device_info | jq .
 curl -s localhost:8080/openai/tools | jq .
 ```
 
-## 提供的工具 (15 个)
+## 提供的工具 (18 个)
 
 | 工具 | 说明 |
 |------|------|
@@ -207,6 +214,11 @@ curl -s localhost:8080/openai/tools | jq .
 | `phone_current_app` | 获取前台应用 |
 | `phone_device_info` | 设备型号、屏幕大小、Android 版本 |
 | `phone_wait` | 等待 N 秒 |
+| `phone_wechat_open_chat` | 按群名搜索并打开微信会话，支持 OCR 和 80% 容错 |
+| `phone_wechat_reply` | 打开已校验的微信会话并回复，带发送确认和有限恢复 |
+| `phone_wechat_collect_context` | 滚动、OCR、去重并采集限定范围的微信聊天记录 |
+
+微信工具不依赖固定列表位置：目标不可见时会自动搜索，忽略易变的群人数后缀，打开后再次校验群名和输入区，并在临时失败时保守重试。应用没有可用无障碍节点时，`phone_capture(mode="hierarchy")` 会自动回退到本机 OCR。
 
 ## 配置
 

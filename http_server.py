@@ -42,6 +42,9 @@ from phone_control.backend import (
     UIElement,
 )
 from phone_control.policy import get_policy
+from phone_control.wechat import open_chat as open_wechat_chat
+from phone_control.wechat import reply as reply_to_wechat
+from phone_control.wechat_context import collect_context as collect_wechat_context
 
 logger = logging.getLogger("phone-http")
 
@@ -157,9 +160,43 @@ def _action_dict(res: ActionResult) -> Dict[str, Any]:
     return d
 
 
+def _capture_dict(cap: Optional[CaptureResult]) -> Optional[Dict[str, Any]]:
+    if cap is None:
+        return None
+    return {
+        "mode": cap.mode,
+        "width": cap.width,
+        "height": cap.height,
+        "foreground": f"{cap.current_package}/{cap.current_activity}",
+        "elements": [_element_to_dict(e) for e in cap.elements[:100]],
+        "total_elements": len(cap.elements),
+        **({"image_base64": cap.png_b64} if cap.png_b64 else {}),
+    }
+
+
+def _rich_action_dict(res: ActionResult) -> Dict[str, Any]:
+    payload = _action_dict(res)
+    if res.meta:
+        payload["meta"] = res.meta
+    capture = _capture_dict(res.capture)
+    if capture is not None:
+        payload["capture"] = capture
+    return payload
+
+
 def _policy_check(action: str, package: str) -> Optional[Dict[str, Any]]:
-    if not package: return None
     policy = get_policy()
+    if policy.requires_approval(action):
+        return {
+            "error": "blocked by phone policy",
+            "action": action,
+            "reason": (
+                "the standalone HTTP server has no approval channel for "
+                "globally restricted actions"
+            ),
+        }
+    if not package:
+        return None
     decision = policy.check_action(action, package)
     if not decision.action_allowed(action):
         return {
@@ -179,6 +216,8 @@ def _resolve_target_package(
     For all other non-safe actions, use the foreground app — agent-supplied
     'package' is IGNORED to prevent policy bypass.
     """
+    if action in _FIXED_PACKAGE_ACTIONS:
+        return _FIXED_PACKAGE_ACTIONS[action]
     if action in _PACKAGE_AWARE_ACTIONS:
         return body.get("package", "")
     try:
@@ -190,6 +229,11 @@ def _resolve_target_package(
 _SAFE_ACTIONS = frozenset({"capture", "wait", "list_apps", "current_app", "device_info"})
 _DANGEROUS_ACTIONS = frozenset({"install_apk", "shell"})
 _PACKAGE_AWARE_ACTIONS = frozenset({"launch_app", "stop_app"})
+_FIXED_PACKAGE_ACTIONS = {
+    "wechat_open_chat": "com.tencent.mm",
+    "wechat_reply": "com.tencent.mm",
+    "wechat_collect_context": "com.tencent.mm",
+}
 
 
 # ── Dispatch ───────────────────────────────────────────────────────
@@ -273,6 +317,28 @@ def _dispatch(backend: PhoneBackend, action: str, body: Dict[str, Any]) -> Dict[
         package = body.get("package")
         if not package: return {"error": "stop_app requires 'package'"}
         return _action_dict(backend.stop_app(package))
+    if action == "wechat_open_chat":
+        chat = str(body.get("chat") or "").strip()
+        if not chat:
+            return {"error": "wechat_open_chat requires 'chat'"}
+        return _rich_action_dict(open_wechat_chat(backend, chat))
+    if action == "wechat_reply":
+        chat = str(body.get("chat") or "").strip()
+        text = str(body.get("text") or "")
+        if not chat or not text:
+            return {"error": "wechat_reply requires 'chat' and non-empty 'text'"}
+        return _rich_action_dict(reply_to_wechat(backend, chat, text))
+    if action == "wechat_collect_context":
+        chat = str(body.get("chat") or "").strip()
+        if not chat:
+            return {"error": "wechat_collect_context requires 'chat'"}
+        return _rich_action_dict(collect_wechat_context(
+            backend, chat, scope=str(body.get("scope") or ""),
+            max_messages=int(body.get("max_messages", 50)),
+            max_pages=int(body.get("max_pages", 8)),
+            max_minutes=int(body.get("max_minutes", 10)),
+            include_images=bool(body.get("include_images", False)),
+        ))
 
     return {"error": f"unknown action: {action!r}"}
 
@@ -387,6 +453,31 @@ OPENAI_TOOLS: List[Dict[str, Any]] = [
             "seconds": {"type": "number", "description": "Seconds (max 30)"},
         }},
     }},
+    {"type": "function", "function": {
+        "name": "phone_wechat_open_chat",
+        "description": "Open a WeChat conversation by title. Uses OCR search, 80% title matching, and verifies the opened chat.",
+        "parameters": {"type": "object", "properties": {
+            "chat": {"type": "string"},
+        }, "required": ["chat"]},
+    }},
+    {"type": "function", "function": {
+        "name": "phone_wechat_reply",
+        "description": "Reply to a verified WeChat conversation with bounded recovery and delivery confirmation.",
+        "parameters": {"type": "object", "properties": {
+            "chat": {"type": "string"}, "text": {"type": "string", "maxLength": 500},
+        }, "required": ["chat", "text"]},
+    }},
+    {"type": "function", "function": {
+        "name": "phone_wechat_collect_context",
+        "description": "Collect bounded, deduplicated WeChat history by OCR and scrolling.",
+        "parameters": {"type": "object", "properties": {
+            "chat": {"type": "string"}, "scope": {"type": "string"},
+            "max_messages": {"type": "integer", "minimum": 1, "maximum": 200},
+            "max_pages": {"type": "integer", "minimum": 1, "maximum": 12},
+            "max_minutes": {"type": "integer", "minimum": 1, "maximum": 1440},
+            "include_images": {"type": "boolean"},
+        }, "required": ["chat"]},
+    }},
 ]
 
 _OPENAI_NAME_TO_ACTION = {t["function"]["name"]: t["function"]["name"].removeprefix("phone_") for t in OPENAI_TOOLS}
@@ -494,7 +585,7 @@ def _validate_bind_host(host: str, allow_public: bool) -> None:
     )
 
 
-if __name__ == "__main__":
+def main() -> None:
     import argparse
     import uvicorn
 
@@ -524,3 +615,7 @@ if __name__ == "__main__":
     sys.stderr.flush()
 
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+
+
+if __name__ == "__main__":
+    main()

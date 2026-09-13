@@ -27,6 +27,9 @@ from phone_control.backend import (
     UIElement,
 )
 from phone_control.policy import get_policy
+from phone_control.wechat import open_chat as open_wechat_chat
+from phone_control.wechat import reply as reply_to_wechat
+from phone_control.wechat_context import collect_context as collect_wechat_context
 
 logger = logging.getLogger("phone-mcp")
 
@@ -131,9 +134,48 @@ def _action_response(res: ActionResult) -> str:
     return json.dumps(d)
 
 
+def _capture_dict(cap: Optional[CaptureResult]) -> Optional[Dict[str, Any]]:
+    if cap is None:
+        return None
+    return {
+        "mode": cap.mode,
+        "width": cap.width,
+        "height": cap.height,
+        "foreground": f"{cap.current_package}/{cap.current_activity}",
+        "elements": [_element_to_dict(e) for e in cap.elements[:100]],
+        "total_elements": len(cap.elements),
+        **({"image_base64": cap.png_b64} if cap.png_b64 else {}),
+    }
+
+
+def _rich_action_response(res: ActionResult) -> str:
+    payload: Dict[str, Any] = {
+        "ok": res.ok,
+        "action": res.action,
+    }
+    if res.message:
+        payload["message"] = res.message
+    if res.meta:
+        payload["meta"] = res.meta
+    capture = _capture_dict(res.capture)
+    if capture is not None:
+        payload["capture"] = capture
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _policy_check(action: str, package: str) -> Optional[str]:
-    if not package: return None
     policy = get_policy()
+    if policy.requires_approval(action):
+        return json.dumps({
+            "error": "blocked by phone policy",
+            "action": action,
+            "reason": (
+                "the standalone MCP server has no approval channel for "
+                "globally restricted actions"
+            ),
+        })
+    if not package:
+        return None
     decision = policy.check_action(action, package)
     if not decision.action_allowed(action):
         return json.dumps({
@@ -332,6 +374,53 @@ def phone_wait(
 ) -> str:
     """Wait for a specified duration."""
     return _action_response(_get_backend().wait(seconds))
+
+
+@mcp.tool()
+def phone_wechat_open_chat(
+    chat: Annotated[str, "WeChat conversation title; group member counts are ignored"],
+) -> str:
+    """Open a WeChat chat by title using OCR search and post-open verification."""
+    backend = _get_backend()
+    blocked = _policy_check("wechat_open_chat", "com.tencent.mm")
+    if blocked:
+        return blocked
+    return _rich_action_response(open_wechat_chat(backend, chat))
+
+
+@mcp.tool()
+def phone_wechat_reply(
+    chat: Annotated[str, "WeChat conversation title"],
+    text: Annotated[str, "Reply text, maximum 500 characters"],
+) -> str:
+    """Reply to a verified WeChat chat with bounded recovery and delivery confirmation."""
+    backend = _get_backend()
+    blocked = _policy_check("wechat_reply", "com.tencent.mm")
+    if blocked:
+        return blocked
+    return _rich_action_response(reply_to_wechat(backend, chat, text))
+
+
+@mcp.tool()
+def phone_wechat_collect_context(
+    chat: Annotated[str, "WeChat conversation title"],
+    scope: Annotated[str, "Optional range such as 最近20条, 最近2小时, or 今天"] = "",
+    max_messages: Annotated[int, "Maximum message lines (default 50)"] = 50,
+    max_pages: Annotated[int, "Maximum pages (default 8)"] = 8,
+    max_minutes: Annotated[int, "Maximum age in minutes (default 10)"] = 10,
+    include_images: Annotated[bool, "Include up to five page screenshots"] = False,
+) -> str:
+    """Collect bounded, deduplicated WeChat history by scrolling and OCR."""
+    backend = _get_backend()
+    blocked = _policy_check("wechat_collect_context", "com.tencent.mm")
+    if blocked:
+        return blocked
+    result = collect_wechat_context(
+        backend, chat, scope=scope, max_messages=max_messages,
+        max_pages=max_pages, max_minutes=max_minutes,
+        include_images=include_images,
+    )
+    return _rich_action_response(result)
 
 
 # ── MCP Resources ─────────────────────────────────────────────────
