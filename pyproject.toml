@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phone-mcp-server"
-version = "0.2.0"
+version = "0.2.1"
 description = "MCP + HTTP server for controlling Android phones — works with Claude, Codex, GPT, Gemini, and any agent framework"
 readme = "README.md"
 license = "AGPL-3.0-only"

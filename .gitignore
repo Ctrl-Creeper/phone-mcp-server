@@ -6,6 +6,3 @@ build/
 .venv/
 .env
 .DS_Store
-helper-apk/.gradle/
-helper-apk/app/build/
-helper-apk/local.properties
