@@ -13,10 +13,6 @@ on:
   schedule:
     - cron: "17 3 * * *"
 
-permissions:
-  contents: write
-  pull-requests: write
-
 concurrency:
   group: sync-from-hermes
   cancel-in-progress: false
@@ -24,8 +20,12 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
 
       - name: Check out Hermes Phone Agent
         uses: actions/checkout@v4
@@ -43,16 +43,47 @@ jobs:
       - name: Test synced server
         run: pytest -q
 
+      - name: Save synchronized files
+        uses: actions/upload-artifact@v4
+        with:
+          name: synchronized-phone-control
+          if-no-files-found: error
+          path: |
+            phone_control
+            phone-policy.yaml
+            upstream.lock.json
+            README.md
+            README_CN.md
+
+  create-pull-request:
+    needs: sync
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Restore synchronized files
+        uses: actions/download-artifact@v4
+        with:
+          name: synchronized-phone-control
+          path: .
+
       - name: Create synchronization pull request
         uses: peter-evans/create-pull-request@v7
         with:
           branch: automation/sync-hermes-phone-agent
+          base: main
           delete-branch: true
           title: "chore: sync from hermes-phone-agent"
           commit-message: "chore: sync from hermes-phone-agent"
           body: |
             Automated one-way sync from `Ctrl-Creeper/hermes-phone-agent`.
 
-            This updates only manifest-approved `phone_control` files and
-            `upstream.lock.json`. Helper APK source remains canonical in the
-            upstream repository; this repository consumes its release asset.
+            This updates only manifest-approved shared files, generated helper
+            install documentation, and `upstream.lock.json`. Helper APK source
+            remains canonical in the upstream repository; this repository
+            consumes its release asset.

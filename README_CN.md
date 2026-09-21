@@ -60,10 +60,12 @@ pip install .
 # 安装 Appium 支持
 pip install ".[appium]"
 
+<!-- helper-apk-install:start -->
 # 可选：安装 Hermes Phone Agent，以支持安全的 Unicode/特殊字符输入
 curl -fL -o hermes-phone-agent-v0.2.4.apk \
   https://github.com/Ctrl-Creeper/hermes-phone-agent/releases/download/v0.2.4/hermes-phone-agent-v0.2.4.apk
 adb install -r hermes-phone-agent-v0.2.4.apk
+<!-- helper-apk-install:end -->
 ```
 
 ## 快速开始

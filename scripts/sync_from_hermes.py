@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,24 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = "sync/phone-control-manifest.json"
 LOCK_PATH = ROOT / "upstream.lock.json"
+
+# The upstream manifest selects a version of this contract. It cannot expand
+# the contract to overwrite downstream workflow, server, or packaging files.
+ALLOWED_CORE_FILES = frozenset({
+    ("plugins/phone_use/backend.py", "phone_control/backend.py"),
+    ("plugins/phone_use/adb_backend.py", "phone_control/adb_backend.py"),
+    ("plugins/phone_use/appium_backend.py", "phone_control/appium_backend.py"),
+    ("plugins/phone_use/appium_manager.py", "phone_control/appium_manager.py"),
+    ("plugins/phone_use/host_ocr.py", "phone_control/host_ocr.py"),
+    ("plugins/phone_use/native/phone_ocr.swift", "phone_control/phone_ocr.swift"),
+    ("plugins/phone_use/policy.py", "phone_control/policy.py"),
+    ("plugins/phone_use/sanitize.py", "phone_control/sanitize.py"),
+    ("plugins/phone_use/wechat.py", "phone_control/wechat.py"),
+    ("plugins/phone_use/wechat_context.py", "phone_control/wechat_context.py"),
+    ("phone-policy.yaml", "phone-policy.yaml"),
+})
+HELPER_BLOCK_START = "<!-- helper-apk-install:start -->"
+HELPER_BLOCK_END = "<!-- helper-apk-install:end -->"
 
 
 def _safe_relative(value: str) -> Path:
@@ -71,6 +90,48 @@ def _write_if_changed(path: Path, data: bytes, check: bool) -> bool:
     return True
 
 
+def _helper_install_block(helper: dict[str, Any], chinese: bool) -> str:
+    asset = helper.get("asset")
+    release_tag = helper.get("release_tag")
+    if not isinstance(asset, str) or not isinstance(release_tag, str):
+        raise RuntimeError("helper asset and release_tag must be strings")
+    url = (
+        "https://github.com/Ctrl-Creeper/hermes-phone-agent/releases/download/"
+        f"{release_tag}/{asset}"
+    )
+    description = (
+        "# 可选：安装 Hermes Phone Agent，以支持安全的 Unicode/特殊字符输入"
+        if chinese
+        else "# Optional: install Hermes Phone Agent for secure Unicode/special-character input"
+    )
+    return (
+        f"{HELPER_BLOCK_START}\n"
+        f"{description}\n"
+        f"curl -fL -o {asset} \\\n"
+        f"  {url}\n"
+        f"adb install -r {asset}\n"
+        f"{HELPER_BLOCK_END}"
+    )
+
+
+def _sync_helper_docs(helper: dict[str, Any], check: bool) -> list[str]:
+    changed: list[str] = []
+    pattern = re.compile(
+        rf"{re.escape(HELPER_BLOCK_START)}.*?{re.escape(HELPER_BLOCK_END)}",
+        re.DOTALL,
+    )
+    for name, chinese in (("README.md", False), ("README_CN.md", True)):
+        path = ROOT / name
+        content = path.read_text(encoding="utf-8")
+        block = _helper_install_block(helper, chinese)
+        updated, replacements = pattern.subn(block, content)
+        if replacements != 1:
+            raise RuntimeError(f"{name} must contain exactly one helper install block")
+        if _write_if_changed(path, updated.encode(), check):
+            changed.append(name)
+    return changed
+
+
 def sync(source: Path, check: bool) -> list[str]:
     source = source.resolve()
     manifest = _load_manifest(source)
@@ -80,8 +141,12 @@ def sync(source: Path, check: bool) -> list[str]:
     for entry in manifest["core_files"]:
         if not isinstance(entry, dict):
             raise RuntimeError("core_files entries must be objects")
-        source_rel = _safe_relative(str(entry.get("source", "")))
-        target_rel = _safe_relative(str(entry.get("target", "")))
+        source_value = str(entry.get("source", ""))
+        target_value = str(entry.get("target", ""))
+        if (source_value, target_value) not in ALLOWED_CORE_FILES:
+            raise RuntimeError(f"manifest mapping is not approved: {source_value} -> {target_value}")
+        source_rel = _safe_relative(source_value)
+        target_rel = _safe_relative(target_value)
         if target_rel in seen_targets:
             raise RuntimeError(f"duplicate target in manifest: {target_rel}")
         seen_targets.add(target_rel)
@@ -89,9 +154,12 @@ def sync(source: Path, check: bool) -> list[str]:
         target_file = ROOT / target_rel
         if not source_file.is_file():
             raise RuntimeError(f"upstream source is missing: {source_rel}")
+        if source_file.is_symlink() or not source_file.resolve().is_relative_to(source):
+            raise RuntimeError(f"upstream source is not a regular file within its checkout: {source_rel}")
         if _write_if_changed(target_file, source_file.read_bytes(), check):
             changed.append(str(target_rel))
 
+    changed.extend(_sync_helper_docs(manifest["helper"], check))
     lock_bytes = (json.dumps(_lock_data(source, manifest), indent=2, sort_keys=True) + "\n").encode()
     if _write_if_changed(LOCK_PATH, lock_bytes, check):
         changed.append(LOCK_PATH.name)
