@@ -32,10 +32,11 @@ jobs:
         with:
           repository: Ctrl-Creeper/hermes-phone-agent
           ref: ${{ github.event.client_payload.source_ref || inputs.source_ref || 'main' }}
-          path: upstream
+          # Keep this outside setuptools' top-level package discovery.
+          path: .sync-upstream
 
       - name: Synchronize the shared core
-        run: python scripts/sync_from_hermes.py --source upstream
+        run: python scripts/sync_from_hermes.py --source .sync-upstream
 
       - name: Install test dependencies
         run: python -m pip install --upgrade pip pytest .
