@@ -25,15 +25,15 @@ except ImportError:
     _XML_HARDENED = False
 from typing import Any, Dict, List, Optional, Tuple
 
-from phone_control.backend import (
+from .backend import (
     ActionResult,
     CaptureResult,
     DeviceInfo,
     PhoneBackend,
     UIElement,
 )
-from phone_control.host_ocr import add_semantic_regions, recognize_text
-from phone_control.sanitize import (
+from .host_ocr import add_semantic_regions, recognize_text
+from .sanitize import (
     validate_activity_name,
     validate_apk_path,
     validate_coordinate,
@@ -191,24 +191,37 @@ class AdbBackend(PhoneBackend):
         elements: List[UIElement] = []
         used_host_ocr = False
         fg = self._get_foreground_app()
-        use_direct_ocr = fg.get("package") == "com.tencent.mm"
+        # WeChat normally benefits from host OCR because its hierarchy is
+        # sparse, but image inspection needs ImageView nodes and therefore
+        # gets a first attempt at the real accessibility hierarchy.
+        use_direct_ocr = (
+            fg.get("package") == "com.tencent.mm" and mode != "image_hierarchy"
+        )
 
-        if mode in ("som", "screenshot"):
+        if mode in ("som", "screenshot", "image_hierarchy"):
             png_b64 = self._take_screenshot()
 
-        if mode in ("som", "hierarchy"):
+        if mode in ("som", "hierarchy", "image_hierarchy"):
             if not use_direct_ocr:
                 elements = self._dump_ui_hierarchy()
-            if not _hierarchy_is_usable(elements):
+            hierarchy_usable = _hierarchy_is_usable(elements)
+            if not hierarchy_usable or mode == "image_hierarchy":
                 ocr_png_b64 = png_b64 or self._take_screenshot()
                 if ocr_png_b64:
                     ocr_elements = recognize_text(ocr_png_b64)
                     if ocr_elements:
-                        elements = ocr_elements
-                        used_host_ocr = True
+                        if hierarchy_usable:
+                            for element in ocr_elements:
+                                if element.class_name != "host.vision.ImageCandidate":
+                                    continue
+                                element.index = len(elements) + 1
+                                elements.append(element)
+                        else:
+                            elements = ocr_elements
+                            used_host_ocr = True
                         logger.info(
-                            "Host OCR fallback produced %d text elements",
-                            len(elements),
+                            "Host vision produced %d element(s)",
+                            len(ocr_elements),
                         )
         if used_host_ocr:
             elements = add_semantic_regions(
@@ -217,7 +230,7 @@ class AdbBackend(PhoneBackend):
                 width=info.screen_width,
                 height=info.screen_height,
             )
-        if mode in ("som", "hierarchy"):
+        if mode in ("som", "hierarchy", "image_hierarchy"):
             self._last_elements = elements
         return CaptureResult(
             mode=mode, width=info.screen_width, height=info.screen_height,

@@ -16,11 +16,11 @@ import tempfile
 from pathlib import Path
 from typing import List, Optional
 
-from phone_control.backend import UIElement
+from .backend import UIElement
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_HELPER_PATH = Path.home() / ".phone-mcp" / "bin" / "phone-ocr"
+_DEFAULT_HELPER_PATH = Path.home() / ".hermes" / "bin" / "phone-ocr"
 
 
 def add_semantic_regions(
@@ -89,10 +89,7 @@ def recognize_text(
     helper_path: Optional[Path] = None,
 ) -> List[UIElement]:
     """Return clickable text boxes recognized from a base64 PNG screenshot."""
-    helper = Path(
-        helper_path
-        or os.environ.get("PHONE_OCR_HELPER", str(_DEFAULT_HELPER_PATH))
-    )
+    helper = Path(helper_path) if helper_path is not None else _DEFAULT_HELPER_PATH
     if not helper.is_file() or not os.access(helper, os.X_OK):
         logger.debug("Host OCR helper is unavailable at %s", helper)
         return []
@@ -148,7 +145,7 @@ def recognize_text(
         parsed.append((top, left, text, confidence, (left, top, right, bottom)))
 
     parsed.sort(key=lambda item: (item[0], item[1]))
-    return [
+    elements = [
         UIElement(
             index=index,
             class_name="host.ocr.Text",
@@ -159,3 +156,25 @@ def recognize_text(
         )
         for index, (_, _, text, confidence, bounds) in enumerate(parsed, start=1)
     ]
+    raw_regions = payload.get("visualRegions", []) if isinstance(payload, dict) else []
+    for raw in raw_regions:
+        if not isinstance(raw, dict):
+            continue
+        bounds = raw.get("bounds")
+        if not isinstance(bounds, list) or len(bounds) != 4:
+            continue
+        try:
+            left, top, right, bottom = (int(value) for value in bounds)
+            confidence = float(raw.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            continue
+        if right <= left or bottom <= top:
+            continue
+        elements.append(UIElement(
+            index=len(elements) + 1,
+            class_name="host.vision.ImageCandidate",
+            bounds=(left, top, right, bottom),
+            clickable=True,
+            attributes={"source": "vision", "confidence": confidence},
+        ))
+    return elements

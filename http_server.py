@@ -249,7 +249,7 @@ def _dispatch(backend: PhoneBackend, action: str, body: Dict[str, Any]) -> Dict[
 
     if action == "capture":
         mode = body.get("mode", "hierarchy")
-        if mode not in ("hierarchy", "screenshot", "som"):
+        if mode not in ("hierarchy", "screenshot", "som", "image_hierarchy"):
             return {"error": f"invalid mode: {mode!r}"}
         cap = backend.capture(mode=mode)
         result: Dict[str, Any] = {
@@ -338,6 +338,8 @@ def _dispatch(backend: PhoneBackend, action: str, body: Dict[str, Any]) -> Dict[
             max_pages=int(body.get("max_pages", 8)),
             max_minutes=int(body.get("max_minutes", 10)),
             include_images=bool(body.get("include_images", False)),
+            open_images=body.get("open_images", True) is not False,
+            max_images=int(body.get("max_images", 3)),
         ))
 
     return {"error": f"unknown action: {action!r}"}
@@ -348,9 +350,9 @@ def _dispatch(backend: PhoneBackend, action: str, body: Dict[str, Any]) -> Dict[
 OPENAI_TOOLS: List[Dict[str, Any]] = [
     {"type": "function", "function": {
         "name": "phone_capture",
-        "description": "Capture the phone screen. mode='hierarchy' (recommended) for UI tree, 'screenshot' for image, 'som' for both.",
+        "description": "Capture the phone screen. mode='hierarchy' (recommended) for UI tree, 'screenshot' for image, 'som' for both, or 'image_hierarchy' for image-bubble inspection.",
         "parameters": {"type": "object", "properties": {
-            "mode": {"type": "string", "enum": ["hierarchy", "screenshot", "som"]},
+            "mode": {"type": "string", "enum": ["hierarchy", "screenshot", "som", "image_hierarchy"]},
         }},
     }},
     {"type": "function", "function": {
@@ -476,6 +478,8 @@ OPENAI_TOOLS: List[Dict[str, Any]] = [
             "max_pages": {"type": "integer", "minimum": 1, "maximum": 12},
             "max_minutes": {"type": "integer", "minimum": 1, "maximum": 1440},
             "include_images": {"type": "boolean"},
+            "open_images": {"type": "boolean"},
+            "max_images": {"type": "integer", "minimum": 1, "maximum": 5},
         }, "required": ["chat"]},
     }},
 ]

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from difflib import SequenceMatcher
 from typing import Callable, Optional
 
-from phone_control.backend import ActionResult, CaptureResult, PhoneBackend, UIElement
+from .backend import ActionResult, CaptureResult, PhoneBackend, UIElement
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,22 @@ _SEND_LABELS = frozenset({"发送", "send", "发送消息", "send message"})
 _VOICE_INPUT_LABELS = frozenset({"hold to talk", "按住说话"})
 _VOICE_TRANSCRIPTION_PREFIXES = ("tap to convert to text", "轻触转文字")
 _MIN_TITLE_SIMILARITY = 0.80
+_SEARCH_RESULT_SECTIONS = frozenset({
+    "top hits", "最佳匹配", "最常使用",
+    "contacts", "联系人",
+    "group chats", "群聊",
+    "official accounts", "公众号",
+    "mini programs", "小程序",
+    "chat history", "聊天记录",
+})
+_TOP_HIT_LABELS = frozenset({"top hits", "最佳匹配", "最常使用"})
+_CONTACT_LABELS = frozenset({"contacts", "通讯录"})
+_CONVERSATION_TAB_LABELS = frozenset({"wechat", "微信", "chats", "聊天"})
+_NEW_FRIENDS_LABELS = frozenset({"new friends", "新的朋友"})
+_ACCEPT_LABELS = frozenset({"accept", "接受", "添加"})
+_ADDED_LABELS = frozenset({"added", "accepted", "已添加", "已通过"})
+_SYMBOL_CHAT_HINT_TTL_SECONDS = 120.0
+_symbol_chat_hint: Optional[tuple[str, str, float]] = None
 
 
 def _label(element: UIElement) -> str:
@@ -58,7 +75,6 @@ def _find_text(elements: list[UIElement], text: str) -> Optional[UIElement]:
 def _normalize_chat_title(value: str) -> str:
     """Normalize WeChat group counts and common OCR punctuation noise."""
     normalized = re.sub(r"\s+", "", value).casefold()
-    normalized = re.sub(r"^[•·●▪︎]+", "", normalized)
     normalized = normalized.translate(str.maketrans({"（": "(", "）": ")"}))
     # WeChat appends a volatile member count to group titles. Depending on
     # locale and OCR, this may be `(24)`, `(24人)`, `(24 members)`, have a
@@ -70,6 +86,63 @@ def _normalize_chat_title(value: str) -> str:
         normalized,
     )
     return normalized
+
+
+def _is_symbol_only_title(value: str) -> bool:
+    normalized = _normalize_chat_title(value)
+    return bool(normalized) and not any(char.isalnum() for char in normalized)
+
+
+def _symbol_header_signature(capture: CaptureResult) -> str:
+    title_limit = max(220, int(capture.height * 0.12))
+    candidates = [
+        element for element in capture.elements
+        if element.bounds[1] < title_limit
+        and int(capture.width * 0.18) <= element.center()[0] <= int(capture.width * 0.82)
+        and _normalize_chat_title(_label(element))
+    ]
+    if not candidates:
+        return ""
+    centered = min(
+        candidates,
+        key=lambda element: abs(element.center()[0] - capture.width // 2),
+    )
+    return _normalize_chat_title(_label(centered))
+
+
+def _remember_symbol_chat(chat: str, capture: CaptureResult) -> None:
+    global _symbol_chat_hint
+    if not _is_symbol_only_title(chat) or _find_input(capture.elements) is None:
+        return
+    signature = _symbol_header_signature(capture)
+    if signature:
+        _symbol_chat_hint = (
+            _normalize_chat_title(chat), signature, time.monotonic(),
+        )
+
+
+def _clear_symbol_chat_hint(chat: str = "") -> None:
+    global _symbol_chat_hint
+    if (
+        not chat
+        or _symbol_chat_hint is None
+        or _symbol_chat_hint[0] == _normalize_chat_title(chat)
+    ):
+        _symbol_chat_hint = None
+
+
+def _matches_recent_symbol_chat(chat: str, capture: CaptureResult) -> bool:
+    global _symbol_chat_hint
+    if _symbol_chat_hint is None or not _is_symbol_only_title(chat):
+        return False
+    wanted, signature, observed_at = _symbol_chat_hint
+    if time.monotonic() - observed_at > _SYMBOL_CHAT_HINT_TTL_SECONDS:
+        _symbol_chat_hint = None
+        return False
+    if wanted != _normalize_chat_title(chat):
+        return False
+    observed = _symbol_header_signature(capture)
+    return bool(observed) and observed == signature
 
 
 def _find_chat_header(capture: CaptureResult, chat: str) -> Optional[UIElement]:
@@ -91,6 +164,12 @@ def _find_chat_header(capture: CaptureResult, chat: str) -> Optional[UIElement]:
             >= _MIN_TITLE_SIMILARITY
         ):
             return element
+    if _matches_recent_symbol_chat(chat, capture):
+        return min(
+            candidates,
+            key=lambda element: abs(element.center()[0] - capture.width // 2),
+            default=None,
+        )
     return None
 
 
@@ -108,6 +187,16 @@ def _is_conversation_list(capture: CaptureResult) -> bool:
         and _normalize_chat_title(_label(element)) in {"wechat", "微信"}
         for element in capture.elements
     ) and _find_input(capture.elements) is None
+
+
+def _find_conversation_tab(capture: CaptureResult) -> Optional[UIElement]:
+    """Find the bottom Chats/WeChat tab on any top-level WeChat page."""
+    min_y = int(capture.height * 0.84)
+    return next((
+        element for element in capture.elements
+        if element.bounds[1] >= min_y
+        and _normalize_chat_title(_label(element)) in _CONVERSATION_TAB_LABELS
+    ), None)
 
 
 def _find_search_control(capture: CaptureResult) -> Optional[UIElement]:
@@ -134,11 +223,16 @@ def _find_search_control(capture: CaptureResult) -> Optional[UIElement]:
 
 def _is_search_page(capture: CaptureResult) -> bool:
     labels = " ".join(_label(element).casefold() for element in capture.elements)
-    return (
+    title_limit = max(220, int(capture.height * 0.12))
+    has_result_section = any(
+        element.bounds[1] >= title_limit
+        and element.bounds[1] < int(capture.height * 0.7)
+        and _label(element).casefold() in _SEARCH_RESULT_SECTIONS
+        for element in capture.elements
+    )
+    return has_result_section or (
         "search local or internet results" in labels
         or "搜索本地或互联网结果" in labels
-        or "group chats" in labels
-        or "群聊" in labels
     )
 
 
@@ -146,7 +240,7 @@ def _settle_capture(
     backend: PhoneBackend,
     capture: CaptureResult,
     predicate: Callable[[CaptureResult], bool],
-    attempts: int = 3,
+    attempts: int = 2,
 ) -> CaptureResult:
     current = capture
     for _ in range(attempts):
@@ -160,11 +254,116 @@ def _settle_capture(
     return current
 
 
+def _return_to_conversation_list(
+    backend: PhoneBackend,
+    capture: CaptureResult,
+    *,
+    max_steps: int = 4,
+) -> ActionResult:
+    """Normalize arbitrary WeChat state to the conversation list."""
+    current = capture
+    for _ in range(max_steps):
+        if _is_conversation_list(current):
+            return ActionResult(
+                ok=True, action="wechat_open_chat", capture=current,
+                message="WeChat conversation list is ready",
+            )
+
+        # Contacts, Discover/Moments, and Me expose the stable bottom tab.
+        # Prefer it over Back because Back can leave WeChat or merely dismiss
+        # a keyboard without changing pages.
+        conversation_tab = _find_conversation_tab(current)
+        if conversation_tab is not None:
+            moved = _run_and_capture(
+                backend, "tap",
+                lambda target=conversation_tab: backend.tap(element=target.index),
+            )
+        elif current.current_activity.casefold().endswith("launcherui"):
+            moved = _run_and_capture(
+                backend, "tap",
+                lambda: backend.tap(
+                    x=int(current.width * 0.125),
+                    y=int(current.height * 0.95),
+                ),
+            )
+        else:
+            moved = _run_and_capture(
+                backend, "keyevent", lambda: backend.keyevent("BACK"),
+            )
+        if not moved.ok or moved.capture is None:
+            return ActionResult(
+                ok=False, action="wechat_open_chat",
+                message=moved.message or "could not return to WeChat conversation list",
+                capture=moved.capture or current,
+            )
+        current = moved.capture
+
+    return ActionResult(
+        ok=False, action="wechat_open_chat",
+        message="could not reach the WeChat conversation list after recovery",
+        capture=current,
+    )
+
+
 def _chat_is_open(capture: CaptureResult, chat: str) -> bool:
     return (
-        _find_chat_header(capture, chat) is not None
+        not _is_search_page(capture)
+        and _find_chat_header(capture, chat) is not None
         and _find_input(capture.elements) is not None
     )
+
+
+def _find_label(
+    capture: CaptureResult,
+    labels: frozenset[str],
+    *,
+    min_y: int = 0,
+) -> Optional[UIElement]:
+    return next((
+        element for element in capture.elements
+        if element.bounds[1] >= min_y and _label(element).casefold() in labels
+    ), None)
+
+
+def _find_row_action(
+    capture: CaptureResult,
+    row: UIElement,
+    labels: frozenset[str],
+) -> Optional[UIElement]:
+    row_y = row.center()[1]
+    candidates = [
+        element for element in capture.elements
+        if _label(element).casefold() in labels
+        and abs(element.center()[1] - row_y) <= 140
+    ]
+    return min(
+        candidates,
+        key=lambda element: abs(element.center()[1] - row_y),
+        default=None,
+    )
+
+
+def _find_top_hit(capture: CaptureResult) -> Optional[UIElement]:
+    """Find the first exact-search hit when OCR cannot read its symbol title."""
+    header = next((
+        element for element in capture.elements
+        if _label(element).casefold() in _TOP_HIT_LABELS
+    ), None)
+    if header is None:
+        return None
+
+    next_section_y = min((
+        element.bounds[1] for element in capture.elements
+        if element.bounds[1] > header.bounds[3]
+        and _label(element).casefold() in _SEARCH_RESULT_SECTIONS
+    ), default=int(capture.height * 0.7))
+    candidates = [
+        element for element in capture.elements
+        if element.bounds[1] > header.bounds[3]
+        and element.bounds[3] < next_section_y
+        and _label(element).casefold() not in _SEARCH_RESULT_SECTIONS
+    ]
+    return min(candidates, key=lambda element: element.bounds[1], default=None)
 
 
 def _search_for_chat(
@@ -215,7 +414,23 @@ def _search_for_chat(
             if element.bounds[1] >= max(220, int(value.height * 0.12))
             and element.bounds[3] < value.height - 180
         ]
-        return _find_text(candidates, chat)
+        matched = _find_text(candidates, chat)
+        if matched is not None:
+            return matched
+        if _is_symbol_only_title(chat):
+            return _find_top_hit(value)
+        return None
+
+    def desired_chat_is_open(value: CaptureResult) -> bool:
+        if _chat_is_open(value, chat):
+            return True
+        # Exact search is still trustworthy for a pure-symbol title even when
+        # Vision renders the glyph as a letter on both the result and header.
+        return (
+            _is_symbol_only_title(chat)
+            and not _is_search_page(value)
+            and _find_input(value.elements) is not None
+        )
 
     results = _settle_capture(
         backend, typed.capture, lambda value: find_result(value) is not None,
@@ -237,15 +452,33 @@ def _search_for_chat(
             message=selected.message or f"could not open search result {chat!r}",
             capture=selected.capture,
         )
+    selected_capture = selected.capture
+    if not desired_chat_is_open(selected_capture) and _is_search_page(selected_capture):
+        # OCR can make the query field look like a chat header and can add a
+        # synthetic input region to result pages. If the first tap was a no-op,
+        # locate the row again from the fresh capture and retry it once.
+        retry_target = find_result(selected_capture)
+        if retry_target is not None:
+            retried = _run_and_capture(
+                backend, "tap", lambda: backend.tap(element=retry_target.index),
+            )
+            if not retried.ok or retried.capture is None:
+                return ActionResult(
+                    ok=False, action="wechat_open_chat",
+                    message=retried.message or f"could not retry search result {chat!r}",
+                    capture=retried.capture,
+                )
+            selected_capture = retried.capture
     selected_capture = _settle_capture(
-        backend, selected.capture, lambda value: _chat_is_open(value, chat),
+        backend, selected_capture, desired_chat_is_open,
     )
-    if not _chat_is_open(selected_capture, chat):
+    if not desired_chat_is_open(selected_capture):
         return ActionResult(
             ok=False, action="wechat_open_chat",
             message=f"search result did not open the requested WeChat chat {chat!r}",
             capture=selected_capture,
         )
+    _remember_symbol_chat(chat, selected_capture)
     return ActionResult(
         ok=True, action="wechat_open_chat",
         message=f"opened WeChat chat {chat!r} via search",
@@ -428,11 +661,14 @@ def _prepare_text_input(
     if current is not capture:
         return ActionResult(ok=True, action="tap", capture=current)
 
-    return _run_and_capture(
-        backend,
-        "tap",
-        lambda: backend.tap(element=message_input.index),
-    )
+    try:
+        focused = backend.tap(element=message_input.index)
+    except Exception as exc:
+        return ActionResult(
+            ok=False, action="tap", message=str(exc), capture=current,
+        )
+    focused.capture = current
+    return focused
 
 
 def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
@@ -455,6 +691,23 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
         )
 
     capture = launch.capture
+    # Android's launcher command can return before WeChat becomes foreground.
+    # Never run WeChat recovery gestures against a stale Launcher screenshot.
+    for _ in range(3):
+        if not capture.current_package or capture.current_package == WECHAT_PACKAGE:
+            break
+        try:
+            capture = backend.capture(mode="hierarchy")
+        except Exception as exc:
+            logger.warning("WeChat foreground wait capture failed: %s", exc)
+            break
+    if capture.current_package and capture.current_package != WECHAT_PACKAGE:
+        return ActionResult(
+            ok=False, action="wechat_open_chat",
+            message="WeChat did not become the foreground app after launch",
+            capture=capture,
+        )
+
     input_element = _find_input(capture.elements)
     if input_element is not None and _find_chat_header(capture, chat) is not None:
         return ActionResult(
@@ -473,6 +726,8 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
             and element.bounds[3] < capture.height - 180
         ]
         if input_element is not None or _find_text(list_elements, chat) is not None:
+            break
+        if _is_search_page(capture) or _find_conversation_tab(capture) is not None:
             break
         if len(capture.elements) >= 10:
             break
@@ -508,28 +763,22 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
                     capture=capture,
                 )
 
-    if input_element is not None:
-        back = _run_and_capture(
-            backend,
-            "keyevent",
-            lambda: backend.keyevent("BACK"),
-        )
-        if not back.ok or back.capture is None:
-            return ActionResult(
-                ok=False,
-                action="wechat_open_chat",
-                message=back.message or "could not return to WeChat conversation list",
-                capture=back.capture,
-            )
-        capture = back.capture
-        capture = _settle_capture(backend, capture, _is_conversation_list)
-        if not _is_conversation_list(capture):
-            return ActionResult(
-                ok=False,
-                action="wechat_open_chat",
-                message="WeChat conversation list did not become ready after Back",
-                capture=capture,
-            )
+    list_elements = [
+        element for element in capture.elements
+        if element.bounds[1] >= max(220, int(capture.height * 0.12))
+        and element.bounds[3] < capture.height - 180
+    ]
+    target = _find_text(list_elements, chat)
+    page_needs_recovery = (
+        _is_search_page(capture)
+        or _find_input(capture.elements) is not None
+        or _find_conversation_tab(capture) is not None
+    )
+    if not _is_conversation_list(capture) and (page_needs_recovery or target is None):
+        recovered = _return_to_conversation_list(backend, capture)
+        if not recovered.ok or recovered.capture is None:
+            return recovered
+        capture = recovered.capture
 
     # Only use a fresh list-row match. A message body or notification preview
     # with the same text must never be treated as a conversation target.
@@ -631,6 +880,45 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
             meta={"delivery_attempted": True, "delivery_status": "uncertain"},
         )
 
+    # ADB reports success when it injects a tap, even if WeChat drops that
+    # input while the keyboard or composer is still transitioning. Only retry
+    # when fresh captures keep showing the Send button: after a real send the
+    # draft clears and that button disappears. Use its current coordinates so
+    # a refreshed OCR element index cannot point at a different control.
+    if not _contains_reply(sent.capture, text) and _find_send(sent.capture) is not None:
+        sent.capture = _settle_capture(
+            backend,
+            sent.capture,
+            lambda value: (
+                _contains_reply(value, text) or _find_send(value) is None
+            ),
+            attempts=2,
+        )
+        retry_send = _find_send(sent.capture)
+        if not _contains_reply(sent.capture, text) and retry_send is not None:
+            retry_x, retry_y = retry_send.center()
+            logger.warning(
+                "WeChat Send remained visible after tap; retrying at (%d, %d)",
+                retry_x,
+                retry_y,
+            )
+            sent = _run_and_capture(
+                backend,
+                "tap",
+                lambda: backend.tap(x=retry_x, y=retry_y),
+            )
+            if not sent.ok or sent.capture is None:
+                return ActionResult(
+                    ok=False,
+                    action="wechat_reply",
+                    message=sent.message or "WeChat send retry failed",
+                    capture=sent.capture,
+                    meta={
+                        "delivery_attempted": True,
+                        "delivery_status": "uncertain",
+                    },
+                )
+
     sent.capture = _settle_capture(
         backend, sent.capture,
         lambda value: _contains_reply(value, text),
@@ -676,11 +964,10 @@ def reply(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
                     "WeChat reply recovery: retrying chat=%r after: %s",
                     chat, result.message,
                 )
-                # Reset transient search/chat state before the second lookup.
-                try:
-                    backend.keyevent("BACK")
-                except Exception:
-                    logger.debug("WeChat recovery Back failed", exc_info=True)
+                # open_chat() owns recovery and verifies that it reached the
+                # conversation list. Avoid an unverified Back here: on a
+                # search page it often only dismisses the keyboard, leaving a
+                # stale query that the next paste can append to.
         result.message = f"after 2 attempts: {result.message}"
         return result
     except Exception as exc:
@@ -708,3 +995,149 @@ def reply(backend: PhoneBackend, chat: str, text: str) -> ActionResult:
                     f"{result.message}; delivery was not retried after Home "
                     f"cleanup failed: {home.message}"
                 )
+        _clear_symbol_chat_hint(chat)
+
+
+def accept_friend_request(backend: PhoneBackend, requester: str) -> ActionResult:
+    """Accept one named WeChat friend request and always return Home."""
+    requester = requester.strip()
+    result = ActionResult(
+        ok=False,
+        action="wechat_accept_friend",
+        message="WeChat friend request action did not run",
+        meta={"requester": requester},
+    )
+    try:
+        if not requester:
+            result.message = "requester is required"
+            return result
+
+        launched = _run_and_capture(
+            backend,
+            "launch_app",
+            lambda: backend.launch_app(WECHAT_PACKAGE),
+        )
+        if not launched.ok or launched.capture is None:
+            result.message = launched.message or "could not launch WeChat"
+            result.capture = launched.capture
+            return result
+        current = launched.capture
+
+        request_row = _find_text(current.elements, requester)
+        accept = (
+            _find_row_action(current, request_row, _ACCEPT_LABELS)
+            if request_row is not None else None
+        )
+        if accept is None:
+            contacts = _find_label(
+                current,
+                _CONTACT_LABELS,
+                min_y=int(current.height * 0.75),
+            )
+            for _ in range(3):
+                if contacts is not None:
+                    break
+                backed = _run_and_capture(
+                    backend, "keyevent", lambda: backend.keyevent("BACK"),
+                )
+                if not backed.ok or backed.capture is None:
+                    result.message = backed.message or "could not reach WeChat navigation"
+                    result.capture = backed.capture
+                    return result
+                current = backed.capture
+                contacts = _find_label(
+                    current,
+                    _CONTACT_LABELS,
+                    min_y=int(current.height * 0.75),
+                )
+            if contacts is None:
+                result.message = "WeChat Contacts tab was not found"
+                result.capture = current
+                return result
+
+            opened_contacts = _run_and_capture(
+                backend, "tap", lambda: backend.tap(element=contacts.index),
+            )
+            if not opened_contacts.ok or opened_contacts.capture is None:
+                result.message = opened_contacts.message or "could not open WeChat Contacts"
+                result.capture = opened_contacts.capture
+                return result
+            current = _settle_capture(
+                backend,
+                opened_contacts.capture,
+                lambda capture: _find_label(capture, _NEW_FRIENDS_LABELS) is not None,
+            )
+            new_friends = _find_label(current, _NEW_FRIENDS_LABELS)
+            if new_friends is None:
+                result.message = "WeChat New Friends entry was not found"
+                result.capture = current
+                return result
+
+            opened_requests = _run_and_capture(
+                backend, "tap", lambda: backend.tap(element=new_friends.index),
+            )
+            if not opened_requests.ok or opened_requests.capture is None:
+                result.message = opened_requests.message or "could not open New Friends"
+                result.capture = opened_requests.capture
+                return result
+            current = _settle_capture(
+                backend,
+                opened_requests.capture,
+                lambda capture: _find_text(capture.elements, requester) is not None,
+            )
+            request_row = _find_text(current.elements, requester)
+            if request_row is None:
+                result.message = f"friend request from {requester!r} was not found"
+                result.capture = current
+                return result
+            accept = _find_row_action(current, request_row, _ACCEPT_LABELS)
+
+        if accept is None or request_row is None:
+            result.message = f"Accept button for {requester!r} was not found"
+            result.capture = current
+            return result
+
+        accepted = _run_and_capture(
+            backend, "tap", lambda: backend.tap(element=accept.index),
+        )
+        if not accepted.ok or accepted.capture is None:
+            result.message = accepted.message or "WeChat Accept action failed"
+            result.capture = accepted.capture
+            return result
+        current = _settle_capture(
+            backend,
+            accepted.capture,
+            lambda capture: (
+                (row := _find_text(capture.elements, requester)) is not None
+                and (
+                    _find_row_action(capture, row, _ADDED_LABELS) is not None
+                    or _find_row_action(capture, row, _ACCEPT_LABELS) is None
+                )
+            ),
+        )
+        request_row = _find_text(current.elements, requester)
+        if request_row is None or _find_row_action(current, request_row, _ACCEPT_LABELS):
+            result.message = f"accepting friend request from {requester!r} could not be confirmed"
+            result.capture = current
+            return result
+
+        result = ActionResult(
+            ok=True,
+            action="wechat_accept_friend",
+            message=f"accepted WeChat friend request from {requester!r}",
+            capture=current,
+            meta={"requester": requester},
+        )
+        return result
+    except Exception as exc:
+        logger.exception("WeChat friend request action failed")
+        result.message = f"accepting WeChat friend request failed: {exc}"
+        return result
+    finally:
+        home = _run_and_capture(
+            backend, "keyevent", lambda: backend.keyevent("HOME"),
+        )
+        result.capture = home.capture or result.capture
+        if not home.ok:
+            result.ok = False
+            result.message = f"{result.message}; could not return to Home: {home.message}"

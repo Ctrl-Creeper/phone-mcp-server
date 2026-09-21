@@ -21,14 +21,14 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .adb_backend import AdbBackend
-from phone_control.backend import (
+from .backend import (
     ActionResult,
     CaptureResult,
     DeviceInfo,
     PhoneBackend,
     UIElement,
 )
-from phone_control.sanitize import validate_text_input
+from .sanitize import validate_text_input
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +149,7 @@ class HybridBackend(PhoneBackend):
     # ── Appium internals ───────────────────────────────────────────
 
     def _check_appium_availability(self) -> None:
-        from phone_control.appium_manager import appium_installed, appium_python_client_available
+        from .appium_manager import appium_installed, appium_python_client_available
 
         if not appium_installed():
             self._appium_available = False
@@ -183,7 +183,7 @@ class HybridBackend(PhoneBackend):
             if not self._appium_available:
                 return None
 
-            from phone_control.appium_manager import get_appium_server
+            from .appium_manager import get_appium_server
 
             server = get_appium_server()
             if not server.ensure_running():
@@ -222,7 +222,7 @@ class HybridBackend(PhoneBackend):
                     pass
                 self._appium_driver = None
 
-        from phone_control.appium_manager import get_appium_server
+        from .appium_manager import get_appium_server
         try:
             get_appium_server().stop()
         except Exception:

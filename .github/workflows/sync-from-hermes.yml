@@ -1,0 +1,58 @@
+name: Sync From Hermes Phone Agent
+
+on:
+  repository_dispatch:
+    types: [hermes-phone-sync]
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "hermes-phone-agent branch, tag, or commit"
+        required: false
+        default: "main"
+        type: string
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-from-hermes
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out Hermes Phone Agent
+        uses: actions/checkout@v4
+        with:
+          repository: Ctrl-Creeper/hermes-phone-agent
+          ref: ${{ github.event.client_payload.source_ref || inputs.source_ref || 'main' }}
+          path: upstream
+
+      - name: Synchronize the shared core
+        run: python scripts/sync_from_hermes.py --source upstream
+
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip pytest .
+
+      - name: Test synced server
+        run: pytest -q
+
+      - name: Create synchronization pull request
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: automation/sync-hermes-phone-agent
+          delete-branch: true
+          title: "chore: sync from hermes-phone-agent"
+          commit-message: "chore: sync from hermes-phone-agent"
+          body: |
+            Automated one-way sync from `Ctrl-Creeper/hermes-phone-agent`.
+
+            This updates only manifest-approved `phone_control` files and
+            `upstream.lock.json`. Helper APK source remains canonical in the
+            upstream repository; this repository consumes its release asset.
