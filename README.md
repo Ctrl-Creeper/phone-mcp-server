@@ -62,7 +62,7 @@ pip install ".[appium]"
 
 # Optional: install Hermes Phone Agent for secure Unicode/special-character input
 curl -fL -o hermes-phone-agent-v0.2.4.apk \
-  https://github.com/Ctrl-Creeper/hermes-phone-agent/releases/download/v0.2.1/hermes-phone-agent-v0.2.4.apk
+  https://github.com/Ctrl-Creeper/hermes-phone-agent/releases/download/v0.2.4/hermes-phone-agent-v0.2.4.apk
 adb install -r hermes-phone-agent-v0.2.4.apk
 ```
 
