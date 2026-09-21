@@ -196,10 +196,10 @@ def _resolve_package(backend: PhoneBackend, explicit_pkg: str) -> str:
 
 @mcp.tool()
 def phone_capture(
-    mode: Annotated[str, "Capture mode: 'hierarchy' (recommended), 'screenshot', or 'som' (both)"] = "hierarchy",
+    mode: Annotated[str, "Capture mode: 'hierarchy' (recommended), 'screenshot', 'som' (both), or 'image_hierarchy' for image-bubble inspection"] = "hierarchy",
 ) -> str:
     """Capture the phone screen. Use 'hierarchy' for the structured UI tree (fast, returns element indices for tapping). Use 'screenshot' only when you need visual context."""
-    if mode not in ("hierarchy", "screenshot", "som"):
+    if mode not in ("hierarchy", "screenshot", "som", "image_hierarchy"):
         return json.dumps({"error": f"invalid mode: {mode!r}"})
     backend = _get_backend()
     cap = backend.capture(mode=mode)
@@ -409,6 +409,8 @@ def phone_wechat_collect_context(
     max_pages: Annotated[int, "Maximum pages (default 8)"] = 8,
     max_minutes: Annotated[int, "Maximum age in minutes (default 10)"] = 10,
     include_images: Annotated[bool, "Include up to five page screenshots"] = False,
+    open_images: Annotated[bool, "Open clearly identified image bubbles for visual analysis"] = True,
+    max_images: Annotated[int, "Maximum image bubbles to open (default 3, maximum 5)"] = 3,
 ) -> str:
     """Collect bounded, deduplicated WeChat history by scrolling and OCR."""
     backend = _get_backend()
@@ -419,6 +421,8 @@ def phone_wechat_collect_context(
         backend, chat, scope=scope, max_messages=max_messages,
         max_pages=max_pages, max_minutes=max_minutes,
         include_images=include_images,
+        open_images=open_images,
+        max_images=max_images,
     )
     return _rich_action_response(result)
 

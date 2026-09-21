@@ -9,7 +9,8 @@ import mcp_server
 
 
 def test_wechat_title_normalization_removes_member_count_and_ocr_noise():
-    assert _normalize_chat_title("• Example Group（24 members）杂") == "examplegroup"
+    assert _normalize_chat_title("• Example Group（24 members）杂") == "•examplegroup"
+    assert _normalize_chat_title("◆") == "◆"
     assert _find_text(
         [UIElement(index=1, class_name="host.ocr.Text", text="Examp1e Group（24）", bounds=(0, 300, 500, 380))],
         "Example Group",

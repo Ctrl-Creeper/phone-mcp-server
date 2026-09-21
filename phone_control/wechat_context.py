@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
-from phone_control.backend import ActionResult, CaptureResult, PhoneBackend
-from phone_control.wechat import open_chat
+from .backend import ActionResult, CaptureResult, PhoneBackend
+from .wechat import open_chat
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,86 @@ class CollectionScope:
 
 class UnsupportedCollectionScope(ValueError):
     """Raised when a non-empty natural-language range cannot be bounded."""
+
+
+def _image_bubbles(capture: CaptureResult) -> list:
+    """Find likely clickable image messages, excluding the composer area."""
+    top = max(160, int(capture.height * 0.07))
+    bottom = capture.height - 235
+    candidates = []
+    for element in capture.elements:
+        label = (element.text or element.content_desc or "").strip().casefold()
+        class_name = (element.class_name or "").casefold()
+        resource_id = (element.resource_id or "").casefold()
+        left, y1, right, y2 = element.bounds
+        area = max(0, right - left) * max(0, y2 - y1)
+        large_image_view = (
+            "image" in class_name
+            and area >= 30_000
+            and (right - left) >= 120
+            and (y2 - y1) >= 120
+        )
+        visual_candidate = class_name == "host.vision.imagecandidate"
+        semantic_image = (
+            visual_candidate
+            or "image" in resource_id
+            or "photo" in resource_id
+            or "图片" in resource_id
+            or large_image_view
+        )
+        if (
+            element.clickable
+            and semantic_image
+            and y1 >= top
+            and y2 <= bottom
+            and area >= 4_000
+        ):
+            candidates.append(element)
+    return candidates
+
+
+def _open_image_bubble(
+    backend: PhoneBackend, element: object, *, chat_activity: str = "",
+) -> Optional[str]:
+    """Open one image bubble, capture its preview, and return to the chat."""
+    tapped = backend.tap(element=element.index)
+    if not tapped.ok:
+        return None
+    backend.wait(0.25)
+    preview = backend.capture(mode="screenshot")
+    # ADB taps succeed even on blank space, and textured message cards can be
+    # mistaken for photos. Only WeChat's image/gallery viewers count as an
+    # opened image; other destinations are recovered below and skipped.
+    preview_activity = (preview.current_activity or "").casefold()
+    left_chat = bool(
+        preview.current_package == "com.tencent.mm"
+        and preview_activity
+        and preview.current_activity != chat_activity
+    )
+    opened_preview = left_chat and any(
+        marker in preview_activity
+        for marker in ("imagegallery", "imagepreview")
+    )
+    image = (
+        preview.png_b64 or getattr(tapped.capture, "png_b64", None)
+    ) if opened_preview else None
+    if not opened_preview:
+        if left_chat:
+            try:
+                backend.keyevent("BACK")
+                backend.wait(0.15)
+            except Exception:
+                logger.warning(
+                    "Could not recover from a non-image WeChat destination",
+                    exc_info=True,
+                )
+        return None
+    try:
+        backend.keyevent("BACK")
+        backend.wait(0.15)
+    except Exception:
+        logger.warning("Could not return from WeChat image preview", exc_info=True)
+    return image
 
 
 def parse_collection_scope(
@@ -70,7 +150,10 @@ def merge_older_lines(existing: list[str], older_page: list[str]) -> list[str]:
 
 def _visible_lines(capture: CaptureResult) -> list[str]:
     top = max(220, int(capture.height * 0.10))
-    bottom = capture.height - 235
+    # The Android IME occupies the lower part of the screenshot while the
+    # message input remains above it. Keep a generous margin so OCR keyboard
+    # rows cannot consume the requested message count.
+    bottom = capture.height - max(400, int(capture.height * 0.22))
     lines = []
     for element in sorted(capture.elements, key=lambda item: (item.bounds[1], item.bounds[0])):
         if element.class_name == "host.ocr.MessageInput":
@@ -79,6 +162,10 @@ def _visible_lines(capture: CaptureResult) -> list[str]:
             continue
         label = re.sub(r"\s+", " ", (element.text or element.content_desc or "")).strip()
         if label:
+            # Apple/Google keyboard OCR commonly appears as rows such as
+            # WERTYU-O, ASDFGHJKL, or ZXCVBNM. These are never chat lines.
+            if re.fullmatch(r"[A-Z][A-Z0-9 .,'’_@#*+\-=]{4,}", label):
+                continue
             lines.append(label)
     return lines
 
@@ -110,7 +197,9 @@ def collect_context(
     max_messages: int = 50,
     max_pages: int = 8,
     max_minutes: int = 10,
-    include_images: bool = False,
+    include_images: bool = True,
+    open_images: bool = True,
+    max_images: int = 3,
 ) -> ActionResult:
     try:
         effective = parse_collection_scope(
@@ -139,38 +228,107 @@ def collect_context(
     current = opened.capture
     combined: list[str] = []
     screenshots: list[str] = []
-    signatures: set[tuple[str, ...]] = set()
+    opened_images = 0
+    max_images = max(0, min(int(max_images), 5))
+    seen_image_bubbles: set[tuple[str, tuple[int, int, int, int]]] = set()
+    signatures: set[tuple[object, ...]] = set()
     stop_reason = "page_limit"
     now = datetime.now().astimezone()
     pages = 0
+    consecutive_repeats = 0
 
     for page_index in range(effective.max_pages):
         if include_images:
-            visual = backend.capture(mode="som")
-            if visual.png_b64 and len(screenshots) < 5:
+            # Image inspection needs the real accessibility nodes (ImageView
+            # bounds/click targets), while ordinary context collection can use
+            # the faster OCR-backed SOM capture.
+            visual = backend.capture(
+                mode="image_hierarchy" if open_images else "som"
+            )
+            if visual.png_b64 and not open_images and len(screenshots) < 5:
                 screenshots.append(visual.png_b64)
             current = visual
 
+            if open_images and opened_images < max_images:
+                for image_element in _image_bubbles(current):
+                    signature = (
+                        (image_element.text or image_element.content_desc or "").strip(),
+                        image_element.bounds,
+                    )
+                    if signature in seen_image_bubbles:
+                        continue
+                    seen_image_bubbles.add(signature)
+                    image = _open_image_bubble(
+                        backend, image_element,
+                        chat_activity=current.current_activity,
+                    )
+                    if image:
+                        screenshots.append(image)
+                        opened_images += 1
+                    if opened_images >= max_images:
+                        break
+
         page_lines = _visible_lines(current)
-        signature = tuple(page_lines)
+        # The same messages remain visible across a successful partial swipe.
+        # Include coarse vertical positions and image regions so an image-only
+        # change is not mistaken for a stuck/repeated page. Quantization absorbs
+        # the small box jitter produced by host OCR between captures.
+        position_markers = tuple(
+            (
+                (element.text or element.content_desc or "").strip(),
+                element.bounds[1] // 64,
+            )
+            for element in current.elements
+            if (element.text or element.content_desc or "").strip()
+            and 160 <= element.bounds[1] < current.height - 235
+        )
+        image_markers = tuple(
+            tuple(value // 64 for value in element.bounds)
+            for element in _image_bubbles(current)
+        )
+        signature = (tuple(page_lines), position_markers, image_markers)
         pages += 1
+        seeking_first_image = open_images and max_images > 0 and opened_images == 0
         if signature in signatures:
-            stop_reason = "repeated_page"
-            break
-        signatures.add(signature)
+            # WeChat may need longer than the normal post-swipe delay to load
+            # older records. During image discovery tolerate one stale frame;
+            # two consecutive repeats still identify a real top/stuck page.
+            if not seeking_first_image or consecutive_repeats >= 1:
+                stop_reason = "repeated_page"
+                break
+            consecutive_repeats += 1
+        else:
+            consecutive_repeats = 0
+            signatures.add(signature)
         combined = page_lines if not combined else merge_older_lines(combined, page_lines)
 
-        if len(combined) >= effective.max_messages:
+        # Text limits bound the returned context, but must not prevent image
+        # discovery when the requested image is just beyond the first page.
+        # Repeated-page and page-count guards below still bound the search.
+        if len(combined) >= effective.max_messages and not seeking_first_image:
             stop_reason = "message_limit"
             break
         oldest = _oldest_visible_time(page_lines, now)
-        if oldest is not None and now - oldest >= timedelta(minutes=effective.max_minutes):
+        if (
+            oldest is not None
+            and now - oldest >= timedelta(minutes=effective.max_minutes)
+            and not seeking_first_image
+        ):
             stop_reason = "time_limit"
             break
         if page_index + 1 >= effective.max_pages:
             break
 
-        swiped = backend.swipe(direction="down", duration_ms=300)
+        # The backend's generic directional swipe is only one third of the
+        # screen width (360 px on this portrait emulator), which advances chat
+        # history too slowly. Keep more than half a viewport of overlap while
+        # covering enough history for bounded image discovery.
+        swiped = backend.swipe(
+            direction="down",
+            from_xy=(current.width // 2, int(current.height * 0.30)),
+            to_xy=(current.width // 2, int(current.height * 0.68)),
+            duration_ms=300,
+        )
         if not swiped.ok:
             return ActionResult(
                 ok=False,
@@ -194,6 +352,7 @@ def collect_context(
         "coverage": coverage,
         "stop_reason": stop_reason,
         "screenshots": screenshots,
+        "image_count": opened_images if open_images else len(screenshots),
     }
     return ActionResult(
         ok=True,
