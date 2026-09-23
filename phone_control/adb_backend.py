@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+
 # Prefer defusedxml to harden against XXE / billion-laughs in the
 # uiautomator XML dump. Fall back to stdlib with a warning if unavailable.
 try:
@@ -59,6 +60,60 @@ _SET_CLIPBOARD_ACTION = "com.hermes.phoneagent.SET_CLIPBOARD"
 
 def adb_available() -> bool:
     return shutil.which("adb") is not None
+
+
+def resolve_adb_serial(serial: Optional[str] = None) -> str:
+    """Resolve one authorized device, failing closed on ambiguity."""
+    if not adb_available():
+        raise RuntimeError(
+            "adb not found on PATH. Install Android SDK platform-tools."
+        )
+    result = subprocess.run(
+        ["adb", "devices", "-l"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            (result.stderr or result.stdout).strip() or "adb devices failed"
+        )
+
+    states: Dict[str, str] = {}
+    for line in result.stdout.splitlines()[1:]:
+        columns = line.split()
+        if len(columns) >= 2:
+            states[columns[0]] = columns[1]
+
+    configured = str(serial or "").strip()
+    if configured:
+        state = states.get(configured)
+        if state == "device":
+            return configured
+        if state == "unauthorized":
+            raise RuntimeError(f"Android device {configured!r} is unauthorized")
+        if state:
+            raise RuntimeError(
+                f"Android device {configured!r} is not ready (state: {state})"
+            )
+        raise RuntimeError(f"Android device {configured!r} is not connected")
+
+    authorized = [device for device, state in states.items() if state == "device"]
+    if len(authorized) == 1:
+        return authorized[0]
+    if len(authorized) > 1:
+        raise RuntimeError(
+            "Multiple authorized Android devices are connected; configure "
+            "the Android serial in config.yaml or ANDROID_SERIAL."
+        )
+    if any(state == "unauthorized" for state in states.values()):
+        raise RuntimeError(
+            "No authorized Android device; approve the ADB connection."
+        )
+    raise RuntimeError(
+        "No Android device/emulator connected. Start one via Android Studio "
+        "or `emulator -avd <name>`."
+    )
 
 
 def _hierarchy_is_usable(elements: List[UIElement]) -> bool:
@@ -115,24 +170,7 @@ class AdbBackend(PhoneBackend):
     # ── Lifecycle ───────────────────────────────────────────────────
 
     def start(self) -> None:
-        if not adb_available():
-            raise RuntimeError(
-                "adb not found on PATH. Install Android SDK platform-tools."
-            )
-        result = self._adb("devices")
-        if result.returncode != 0:
-            raise RuntimeError(f"adb devices failed: {result.stderr}")
-        lines = [
-            l for l in result.stdout.strip().splitlines()[1:]
-            if l.strip() and "\tdevice" in l
-        ]
-        if not lines:
-            raise RuntimeError(
-                "No Android device/emulator connected. Start one via "
-                "Android Studio or `emulator -avd <name>`."
-            )
-        if not self._serial:
-            self._serial = lines[0].split("\t")[0]
+        self._serial = resolve_adb_serial(self._serial)
         self._started = True
         self._device_info = self._fetch_device_info()
 
