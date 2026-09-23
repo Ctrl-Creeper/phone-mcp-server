@@ -224,6 +224,10 @@ curl -s localhost:8080/openai/tools | jq .
 
 微信工具不依赖固定列表位置：目标不可见时会自动搜索，忽略易变的群人数后缀，打开后再次校验群名和输入区，并在临时失败时保守重试。应用没有可用无障碍节点时，`phone_capture(mode="hierarchy")` 会自动回退到本机 OCR。
 
+`phone_wechat_collect_context` 默认只读当前一页文字。需要更早消息时传入
+`scope` 或 `max_pages`；需要打开图片预览时，同时设置 `include_images=true`
+和 `open_images=true`，图片查找可能在限定范围内翻页。
+
 ## 配置
 
 | 环境变量 | 说明 | 默认值 |
