@@ -227,6 +227,10 @@ conversation is not visible, ignore volatile member-count suffixes, verify the
 opened title and input area, and recover conservatively after transient UI failures.
 `phone_capture(mode="hierarchy")` automatically falls back to local OCR when an
 app exposes no usable accessibility nodes.
+`phone_wechat_collect_context` reads one text page by default. Pass `scope`
+or `max_pages` to inspect earlier messages. To inspect photo previews, explicitly
+set both `include_images=true` and `open_images=true`; image search may page
+through bounded history.
 
 ## Configuration
 

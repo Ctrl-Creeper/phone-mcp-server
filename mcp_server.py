@@ -406,20 +406,22 @@ def phone_wechat_collect_context(
     chat: Annotated[str, "WeChat conversation title"],
     scope: Annotated[str, "Optional range such as 最近20条, 最近2小时, or 今天"] = "",
     max_messages: Annotated[int, "Maximum message lines (default 50)"] = 50,
-    max_pages: Annotated[int, "Maximum pages (default 8)"] = 8,
+    max_pages: Annotated[Optional[int], "Maximum pages (default 1; 8 for explicit history or image search)"] = None,
     max_minutes: Annotated[int, "Maximum age in minutes (default 10)"] = 10,
-    include_images: Annotated[bool, "Include up to five page screenshots"] = False,
-    open_images: Annotated[bool, "Open clearly identified image bubbles for visual analysis"] = True,
+    include_images: Annotated[bool, "Include page screenshots when requested (default false)"] = False,
+    open_images: Annotated[bool, "Open image bubbles only when requested together with include_images (default false)"] = False,
     max_images: Annotated[int, "Maximum image bubbles to open (default 3, maximum 5)"] = 3,
 ) -> str:
-    """Collect bounded, deduplicated WeChat history by scrolling and OCR."""
+    """Read one current WeChat text page by default; request history or images explicitly."""
     backend = _get_backend()
     blocked = _policy_check("wechat_collect_context", "com.tencent.mm")
     if blocked:
         return blocked
+    open_images = include_images and open_images
+    pages = max_pages if max_pages is not None else (8 if scope or open_images else 1)
     result = collect_wechat_context(
         backend, chat, scope=scope, max_messages=max_messages,
-        max_pages=max_pages, max_minutes=max_minutes,
+        max_pages=pages, max_minutes=max_minutes,
         include_images=include_images,
         open_images=open_images,
         max_images=max_images,

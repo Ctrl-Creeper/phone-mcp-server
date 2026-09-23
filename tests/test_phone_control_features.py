@@ -50,3 +50,30 @@ def test_standalone_servers_block_actions_that_require_hermes_approval(monkeypat
     monkeypatch.setattr(mcp_server, "get_policy", lambda: policy)
     assert http_server._policy_check("wechat_reply", "com.tencent.mm")["error"]
     assert json.loads(mcp_server._policy_check("wechat_reply", "com.tencent.mm"))["error"]
+
+
+def test_context_entrypoints_default_to_one_text_page_and_keep_explicit_history(monkeypatch):
+    observed = []
+
+    def collect(_backend, _chat, **kwargs):
+        observed.append(kwargs)
+        return ActionResult(ok=True, action="wechat_collect_context", meta={"screenshots": []})
+
+    monkeypatch.setattr(mcp_server, "_get_backend", lambda: object())
+    monkeypatch.setattr(mcp_server, "_policy_check", lambda *_: None)
+    monkeypatch.setattr(mcp_server, "collect_wechat_context", collect)
+    monkeypatch.setattr(http_server, "_policy_check", lambda *_: None)
+    monkeypatch.setattr(http_server, "collect_wechat_context", collect)
+
+    mcp_server.phone_wechat_collect_context("Example")
+    http_server._dispatch(object(), "wechat_collect_context", {"chat": "Example"})
+    assert all(call["max_pages"] == 1 and not call["include_images"]
+               and not call["open_images"] for call in observed)
+
+    mcp_server.phone_wechat_collect_context("Example", scope="最近20条")
+    http_server._dispatch(object(), "wechat_collect_context", {
+        "chat": "Example", "include_images": True, "open_images": True,
+    })
+    assert observed[-2]["max_pages"] == 8 and not observed[-2]["open_images"]
+    assert observed[-1]["max_pages"] == 8 and observed[-1]["include_images"]
+    assert observed[-1]["open_images"]

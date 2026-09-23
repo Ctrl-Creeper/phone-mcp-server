@@ -332,13 +332,18 @@ def _dispatch(backend: PhoneBackend, action: str, body: Dict[str, Any]) -> Dict[
         chat = str(body.get("chat") or "").strip()
         if not chat:
             return {"error": "wechat_collect_context requires 'chat'"}
+        include_images = body.get("include_images") is True
+        open_images = include_images and body.get("open_images") is True
+        pages = body.get("max_pages")
+        if pages is None:
+            pages = 8 if body.get("scope") or open_images else 1
         return _rich_action_dict(collect_wechat_context(
             backend, chat, scope=str(body.get("scope") or ""),
             max_messages=int(body.get("max_messages", 50)),
-            max_pages=int(body.get("max_pages", 8)),
+            max_pages=int(pages),
             max_minutes=int(body.get("max_minutes", 10)),
-            include_images=bool(body.get("include_images", False)),
-            open_images=body.get("open_images", True) is not False,
+            include_images=include_images,
+            open_images=open_images,
             max_images=int(body.get("max_images", 3)),
         ))
 
@@ -471,14 +476,15 @@ OPENAI_TOOLS: List[Dict[str, Any]] = [
     }},
     {"type": "function", "function": {
         "name": "phone_wechat_collect_context",
-        "description": "Collect bounded, deduplicated WeChat history by OCR and scrolling.",
+        "description": "Read one current WeChat text page by default; request history or images explicitly.",
         "parameters": {"type": "object", "properties": {
             "chat": {"type": "string"}, "scope": {"type": "string"},
             "max_messages": {"type": "integer", "minimum": 1, "maximum": 200},
-            "max_pages": {"type": "integer", "minimum": 1, "maximum": 12},
+            "max_pages": {"type": "integer", "minimum": 1, "maximum": 12,
+                          "description": "Default 1; 8 with a history scope or image search."},
             "max_minutes": {"type": "integer", "minimum": 1, "maximum": 1440},
-            "include_images": {"type": "boolean"},
-            "open_images": {"type": "boolean"},
+            "include_images": {"type": "boolean", "default": False},
+            "open_images": {"type": "boolean", "default": False},
             "max_images": {"type": "integer", "minimum": 1, "maximum": 5},
         }, "required": ["chat"]},
     }},
