@@ -55,6 +55,6 @@
     "version_code": 6
   },
   "schema_version": 1,
-  "upstream_commit": "125e8054249aad50525f66bc2a3ecfd7d3296f99",
+  "upstream_commit": "0b0bfc85b59b0549bd8bc58cc06686f02dcda044",
   "upstream_repository": "Ctrl-Creeper/hermes-phone-agent"
 }
