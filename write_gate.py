@@ -44,10 +44,10 @@ def stage_request(path: str) -> tuple[Optional[dict], Optional[str]]:
         # before the file is opened.
         target = Path(path).expanduser().resolve()
         if not target.is_relative_to(base):
-            logger.warning("attachment outside %s rejected: %s", ATTACHMENT_DIR_ENV, target)
+            logger.warning("attachment outside %s rejected: %r", ATTACHMENT_DIR_ENV, str(target))
             return None, _DENIED
         metadata, _ = read_attachment(str(target))
         return metadata, None
     except (OSError, ValueError) as exc:
-        logger.warning("attachment rejected: %s", exc)
+        logger.warning("attachment rejected: %r", exc)
         return None, _DENIED
