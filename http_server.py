@@ -42,9 +42,14 @@ from phone_control.backend import (
     UIElement,
 )
 from phone_control.policy import get_policy
+from phone_control.wechat import accept_friend_request as accept_wechat_friend
+from phone_control.wechat import favorite_message as favorite_wechat_message
 from phone_control.wechat import open_chat as open_wechat_chat
 from phone_control.wechat import reply as reply_to_wechat
+from phone_control.wechat import search_history as search_wechat_history
+from phone_control.wechat import send_attachment as send_wechat_attachment
 from phone_control.wechat_context import collect_context as collect_wechat_context
+import write_gate
 
 logger = logging.getLogger("phone-http")
 
@@ -233,7 +238,12 @@ _FIXED_PACKAGE_ACTIONS = {
     "wechat_open_chat": "com.tencent.mm",
     "wechat_reply": "com.tencent.mm",
     "wechat_collect_context": "com.tencent.mm",
+    "wechat_search_history": "com.tencent.mm",
+    "wechat_favorite": "com.tencent.mm",
+    "wechat_send_attachment": "com.tencent.mm",
+    "wechat_accept_friend": "com.tencent.mm",
 }
+_WRITE_ACTIONS = frozenset({"wechat_favorite", "wechat_send_attachment", "wechat_accept_friend"})
 
 
 # ── Dispatch ───────────────────────────────────────────────────────
@@ -243,6 +253,9 @@ def _dispatch(backend: PhoneBackend, action: str, body: Dict[str, Any]) -> Dict[
         return {"error": f"'{action}' is not allowed via HTTP API for security reasons"}
 
     if action not in _SAFE_ACTIONS:
+        reason = write_gate.blocked_reason(action) if action in _WRITE_ACTIONS else None
+        if reason:
+            return {"error": "blocked by phone policy", "action": action, "reason": reason}
         pkg = _resolve_target_package(backend, action, body)
         blocked = _policy_check(action, pkg)
         if blocked: return blocked
@@ -327,7 +340,37 @@ def _dispatch(backend: PhoneBackend, action: str, body: Dict[str, Any]) -> Dict[
         text = str(body.get("text") or "")
         if not chat or not text:
             return {"error": "wechat_reply requires 'chat' and non-empty 'text'"}
-        return _rich_action_dict(reply_to_wechat(backend, chat, text))
+        quote = {k: body[k] for k in ("quote_text", "quote_sender", "quote_context")
+                 if body.get("quote_text") and k in body}
+        if quote and "quote_max_pages" in body:
+            quote["quote_max_pages"] = int(body["quote_max_pages"])
+        return _rich_action_dict(reply_to_wechat(backend, chat, text, **quote))
+    if action == "wechat_search_history":
+        chat = str(body.get("chat") or "").strip()
+        if not chat:
+            return {"error": "wechat_search_history requires 'chat'"}
+        return _rich_action_dict(search_wechat_history(
+            backend, chat, str(body.get("query") or ""), max_pages=int(body.get("max_pages", 3))))
+    if action == "wechat_favorite":
+        chat = str(body.get("chat") or "").strip()
+        if not chat:
+            return {"error": "wechat_favorite requires 'chat'"}
+        return _rich_action_dict(favorite_wechat_message(
+            backend, chat, str(body.get("message_text") or "")))
+    if action == "wechat_send_attachment":
+        chat = str(body.get("chat") or "").strip()
+        if not chat:
+            return {"error": "wechat_send_attachment requires 'chat'"}
+        attachment, error = write_gate.stage_request(str(body.get("file_path") or ""))
+        if error:
+            return {"error": error}
+        return _rich_action_dict(send_wechat_attachment(
+            backend, chat, attachment["path"], attachment["sha256"]))
+    if action == "wechat_accept_friend":
+        requester = str(body.get("requester") or "").strip()
+        if not requester:
+            return {"error": "wechat_accept_friend requires 'requester'"}
+        return _rich_action_dict(accept_wechat_friend(backend, requester))
     if action == "wechat_collect_context":
         chat = str(body.get("chat") or "").strip()
         if not chat:
@@ -472,7 +515,39 @@ OPENAI_TOOLS: List[Dict[str, Any]] = [
         "description": "Reply to a verified WeChat conversation with bounded recovery and delivery confirmation.",
         "parameters": {"type": "object", "properties": {
             "chat": {"type": "string"}, "text": {"type": "string", "maxLength": 500},
+            "quote_text": {"type": "string", "description": "Observed original to quote."},
+            "quote_sender": {"type": "string"}, "quote_context": {"type": "string"},
+            "quote_max_pages": {"type": "integer", "minimum": 1, "maximum": 8},
         }, "required": ["chat", "text"]},
+    }},
+    {"type": "function", "function": {
+        "name": "phone_wechat_search_history",
+        "description": "Search one verified WeChat chat with WeChat's history search (read-only).",
+        "parameters": {"type": "object", "properties": {
+            "chat": {"type": "string"}, "query": {"type": "string", "maxLength": 100},
+            "max_pages": {"type": "integer", "minimum": 1, "maximum": 8},
+        }, "required": ["chat", "query"]},
+    }},
+    {"type": "function", "function": {
+        "name": "phone_wechat_favorite",
+        "description": "Favorite one exact visible text message. Disabled unless PHONE_MCP_ENABLE_WECHAT_WRITES=1.",
+        "parameters": {"type": "object", "properties": {
+            "chat": {"type": "string"}, "message_text": {"type": "string", "maxLength": 2000},
+        }, "required": ["chat", "message_text"]},
+    }},
+    {"type": "function", "function": {
+        "name": "phone_wechat_send_attachment",
+        "description": "Send one file (max 20 MiB) from PHONE_MCP_ATTACHMENT_DIR. Disabled unless PHONE_MCP_ENABLE_WECHAT_WRITES=1.",
+        "parameters": {"type": "object", "properties": {
+            "chat": {"type": "string"}, "file_path": {"type": "string"},
+        }, "required": ["chat", "file_path"]},
+    }},
+    {"type": "function", "function": {
+        "name": "phone_wechat_accept_friend",
+        "description": "Accept one named friend request. Disabled unless PHONE_MCP_ENABLE_WECHAT_WRITES=1.",
+        "parameters": {"type": "object", "properties": {
+            "requester": {"type": "string"},
+        }, "required": ["requester"]},
     }},
     {"type": "function", "function": {
         "name": "phone_wechat_collect_context",
