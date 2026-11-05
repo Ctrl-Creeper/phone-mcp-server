@@ -219,7 +219,11 @@ curl -s localhost:8080/openai/tools | jq .
 | `phone_device_info` | Device model, screen size, Android version |
 | `phone_wait` | Wait N seconds |
 | `phone_wechat_open_chat` | Find and open a WeChat conversation by title with OCR search and 80% matching |
-| `phone_wechat_reply` | Reply to a verified WeChat conversation with delivery confirmation and bounded recovery |
+| `phone_wechat_reply` | Reply to a verified WeChat conversation with delivery confirmation and bounded recovery; optional `quote_text` quotes an observed message |
+| `phone_wechat_search_history` | Search one verified chat with WeChat's history search (read-only) |
+| `phone_wechat_favorite` | Favorite one exact visible text message (write; off by default) |
+| `phone_wechat_send_attachment` | Send one file as a WeChat file message (write; off by default) |
+| `phone_wechat_accept_friend` | Accept one named friend request (write; off by default) |
 | `phone_wechat_collect_context` | Scroll, OCR, deduplicate, and collect bounded WeChat history |
 
 The WeChat tools do not depend on a fixed list position. They search when the
@@ -227,6 +231,12 @@ conversation is not visible, ignore volatile member-count suffixes, verify the
 opened title and input area, and recover conservatively after transient UI failures.
 `phone_capture(mode="hierarchy")` automatically falls back to local OCR when an
 app exposes no usable accessibility nodes.
+The three write tools have no approval channel here, so they refuse to run
+unless `PHONE_MCP_ENABLE_WECHAT_WRITES=1`. File sending additionally needs
+`PHONE_MCP_ATTACHMENT_DIR`; only files inside it (symlinks resolved) are sent.
+Sent files and replies report `delivery_status=uncertain` when delivery cannot be
+confirmed. Do not retry those.
+
 `phone_wechat_collect_context` reads one text page by default. Pass `scope`
 or `max_pages` to inspect earlier messages. To inspect photo previews, explicitly
 set both `include_images=true` and `open_images=true`; image search may page

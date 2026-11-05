@@ -27,9 +27,14 @@ from phone_control.backend import (
     UIElement,
 )
 from phone_control.policy import get_policy
+from phone_control.wechat import accept_friend_request as accept_wechat_friend
+from phone_control.wechat import favorite_message as favorite_wechat_message
 from phone_control.wechat import open_chat as open_wechat_chat
 from phone_control.wechat import reply as reply_to_wechat
+from phone_control.wechat import search_history as search_wechat_history
+from phone_control.wechat import send_attachment as send_wechat_attachment
 from phone_control.wechat_context import collect_context as collect_wechat_context
+import write_gate
 
 logger = logging.getLogger("phone-mcp")
 
@@ -392,13 +397,83 @@ def phone_wechat_open_chat(
 def phone_wechat_reply(
     chat: Annotated[str, "WeChat conversation title"],
     text: Annotated[str, "Reply text, maximum 500 characters"],
+    quote_text: Annotated[str, "Observed original text to quote (from collect_context message_candidates)"] = "",
+    quote_sender: Annotated[str, "Optional observed sender of the quoted message"] = "",
+    quote_context: Annotated[str, "Optional observed nearby text to disambiguate the quote"] = "",
+    quote_max_pages: Annotated[int, "Pages to search for the quoted message (1-8, default 3)"] = 3,
 ) -> str:
     """Reply to a verified WeChat chat with bounded recovery and delivery confirmation."""
     backend = _get_backend()
     blocked = _policy_check("wechat_reply", "com.tencent.mm")
     if blocked:
         return blocked
-    return _rich_action_response(reply_to_wechat(backend, chat, text))
+    quote = ({"quote_text": quote_text, "quote_sender": quote_sender,
+              "quote_context": quote_context, "quote_max_pages": quote_max_pages}
+             if quote_text else {})
+    return _rich_action_response(reply_to_wechat(backend, chat, text, **quote))
+
+
+@mcp.tool()
+def phone_wechat_search_history(
+    chat: Annotated[str, "WeChat conversation title"],
+    query: Annotated[str, "Keyword, 1-100 characters"],
+    max_pages: Annotated[int, "Result pages to read (1-8, default 3)"] = 3,
+) -> str:
+    """Search one verified chat with WeChat's own history search (read-only)."""
+    backend = _get_backend()
+    blocked = _policy_check("wechat_search_history", "com.tencent.mm")
+    if blocked:
+        return blocked
+    return _rich_action_response(search_wechat_history(backend, chat, query, max_pages=max_pages))
+
+
+def _write_blocked(action: str) -> Optional[str]:
+    reason = write_gate.blocked_reason(action)
+    if reason:
+        return json.dumps({"error": "blocked by phone policy", "action": action, "reason": reason})
+    return _policy_check(action, "com.tencent.mm")
+
+
+@mcp.tool()
+def phone_wechat_favorite(
+    chat: Annotated[str, "WeChat conversation title"],
+    message_text: Annotated[str, "Exact visible text of one message, 1-2000 characters"],
+) -> str:
+    """Favorite one exact visible text message. Disabled unless writes are enabled."""
+    backend = _get_backend()
+    blocked = _write_blocked("wechat_favorite")
+    if blocked:
+        return blocked
+    return _rich_action_response(favorite_wechat_message(backend, chat, message_text))
+
+
+@mcp.tool()
+def phone_wechat_send_attachment(
+    chat: Annotated[str, "WeChat conversation title"],
+    file_path: Annotated[str, "File inside PHONE_MCP_ATTACHMENT_DIR, at most 20 MiB"],
+) -> str:
+    """Send one file as a WeChat file message. Disabled unless writes are enabled."""
+    blocked = _write_blocked("wechat_send_attachment")
+    if blocked:
+        return blocked
+    attachment, error = write_gate.stage_request(file_path)
+    if error:
+        return json.dumps({"ok": False, "error": error})
+    backend = _get_backend()
+    return _rich_action_response(
+        send_wechat_attachment(backend, chat, attachment["path"], attachment["sha256"]))
+
+
+@mcp.tool()
+def phone_wechat_accept_friend(
+    requester: Annotated[str, "Name shown on the pending friend request"],
+) -> str:
+    """Accept one named friend request. Disabled unless writes are enabled."""
+    backend = _get_backend()
+    blocked = _write_blocked("wechat_accept_friend")
+    if blocked:
+        return blocked
+    return _rich_action_response(accept_wechat_friend(backend, requester))
 
 
 @mcp.tool()
