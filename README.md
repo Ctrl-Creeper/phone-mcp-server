@@ -48,7 +48,7 @@ Works with Claude Desktop, Claude Code, OpenAI Codex CLI, GPT agents (via OpenAI
 
 **Optional (for apps with an empty accessibility tree):**
 - macOS 13+ and Xcode Command Line Tools. Build the local Vision OCR helper:
-  `mkdir -p ~/.phone-mcp/bin && swiftc phone_control/phone_ocr.swift -o ~/.phone-mcp/bin/phone-ocr -framework Vision -framework ImageIO`
+  `mkdir -p ~/.phone-mcp/bin && swiftc -O phone_control/phone_ocr.swift -o ~/.phone-mcp/bin/phone-ocr -framework Vision -framework ImageIO -framework CoreGraphics`
 
 ## Install
 
