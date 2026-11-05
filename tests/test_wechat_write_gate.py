@@ -54,6 +54,10 @@ def test_attachment_must_live_inside_allowed_dir(monkeypatch, tmp_path):
     assert error is None and meta["size"] == 4
     assert write_gate.stage_request(str(outside / "b.txt"))[1]
     assert write_gate.stage_request(str(allowed / "link.txt"))[1]  # symlink escape
+    # Missing and outside-but-existing paths must be indistinguishable.
+    assert (write_gate.stage_request(str(outside / "b.txt"))[1]
+            == write_gate.stage_request(str(outside / "missing.txt"))[1]
+            == write_gate.stage_request(str(allowed / "link.txt"))[1])
     monkeypatch.delenv(write_gate.ATTACHMENT_DIR_ENV)
     assert write_gate.stage_request(str(allowed / "a.txt"))[1]  # no allow-dir = disabled
 
