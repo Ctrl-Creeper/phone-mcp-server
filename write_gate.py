@@ -6,11 +6,14 @@ an allow-directory, so a prompted client cannot send arbitrary host files.
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional
 
 from phone_control.adb_backend import read_attachment
+
+logger = logging.getLogger("phone-mcp")
 
 ENABLE_ENV = "PHONE_MCP_ENABLE_WECHAT_WRITES"
 ATTACHMENT_DIR_ENV = "PHONE_MCP_ATTACHMENT_DIR"
@@ -23,18 +26,28 @@ def blocked_reason(action: str) -> Optional[str]:
             f"channel. Set {ENABLE_ENV}=1 to allow it.")
 
 
+_DENIED = "file is not available for sending"
+
+
 def stage_request(path: str) -> tuple[Optional[dict], Optional[str]]:
-    """Return (attachment metadata, error) for a file inside the allow-directory."""
+    """Return (attachment metadata, error) for a file inside the allow-directory.
+
+    Every rejection returns the same error, so a client cannot probe which host
+    paths exist. The reason is logged server-side only.
+    """
     root = os.environ.get(ATTACHMENT_DIR_ENV, "").strip()
     if not root:
         return None, f"file sending needs {ATTACHMENT_DIR_ENV} to name the allowed directory"
     try:
         base = Path(root).expanduser().resolve(strict=True)
-        # resolve() follows symlinks, so an escape through one is rejected here.
-        target = Path(path).expanduser().resolve(strict=True)
+        # resolve() follows symlinks, so an escape through one is rejected here,
+        # before the file is opened.
+        target = Path(path).expanduser().resolve()
         if not target.is_relative_to(base):
-            return None, "file is outside the allowed attachment directory"
+            logger.warning("attachment outside %s rejected: %r", ATTACHMENT_DIR_ENV, str(target))
+            return None, _DENIED
         metadata, _ = read_attachment(str(target))
         return metadata, None
     except (OSError, ValueError) as exc:
-        return None, str(exc)
+        logger.warning("attachment rejected: %r", exc)
+        return None, _DENIED
