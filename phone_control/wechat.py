@@ -10,6 +10,7 @@ from difflib import SequenceMatcher
 from typing import Callable, Optional
 
 from .backend import ActionResult, CaptureResult, PhoneBackend, UIElement
+from .host_ocr import recognize_text
 
 logger = logging.getLogger(__name__)
 
@@ -344,22 +345,37 @@ def _is_search_page(capture: CaptureResult) -> bool:
     )
 
 
+# How long WeChat gets to react to a Send tap before the host concludes the tap
+# was dropped. A wall-clock floor, not a capture count: once captures got fast,
+# a count-based wait shrank and a slow-but-real send could be tapped twice.
+_SEND_REACTION_SECONDS = 3.0
+
+
 def _settle_capture(
     backend: PhoneBackend,
     capture: CaptureResult,
     predicate: Callable[[CaptureResult], bool],
     attempts: int = 2,
+    until: float = 0.0,
 ) -> CaptureResult:
+    """Re-capture until *predicate* holds, for *attempts* captures and, if
+    given, at least until the ``time.monotonic()`` deadline *until*."""
     current = capture
-    for _ in range(attempts):
-        if predicate(current):
-            break
+    tries = 0
+    while not predicate(current) and (tries < attempts or time.monotonic() < until):
+        if tries >= attempts:
+            time.sleep(0.25)
         try:
             current = backend.capture(mode="hierarchy")
         except Exception as exc:
             logger.warning("WeChat settle capture failed: %s", exc)
             break
+        tries += 1
     return current
+
+
+# Longest a chat-list or search-result tap may take to open the chat.
+_LIST_TAP_REACTION_SECONDS = 5.0
 
 
 def _retap_if_still_on_list(
@@ -370,9 +386,17 @@ def _retap_if_still_on_list(
 ) -> CaptureResult:
     """Repeat a list tap once if WeChat dropped it.
 
-    Right after a cold start WeChat draws the conversation list before it
-    accepts input. A still-visible list proves the first tap was not handled.
+    A list that stays on screen briefly is not proof: a cold-started WeChat
+    takes up to ~4 s to open a chat after a row tap (measured 2.8-4.0 s on
+    the emulator), and tapping again then lands inside the opening chat.
+    Wait on the wall clock before concluding the tap was dropped, and wait for
+    *done* itself: leaving the list is not enough, because the chat then
+    slides in over it for a few frames that are neither list nor chat.
     """
+    capture = _settle_capture(
+        backend, capture, done,
+        attempts=0, until=time.monotonic() + _LIST_TAP_REACTION_SECONDS,
+    )
     if done(capture) or not _is_conversation_list(capture):
         return capture
     x, y = target.center()
@@ -380,7 +404,8 @@ def _retap_if_still_on_list(
     retry = _run_and_capture(backend, "tap", lambda: backend.tap(x=x, y=y))
     if not retry.ok or retry.capture is None:
         return capture
-    return _settle_capture(backend, retry.capture, done)
+    return _settle_capture(backend, retry.capture, done,
+                           attempts=0, until=time.monotonic() + _LIST_TAP_REACTION_SECONDS)
 
 
 def _return_to_conversation_list(
@@ -449,9 +474,12 @@ def _return_to_conversation_list(
 
 def _chat_is_open(capture: CaptureResult, chat: str) -> bool:
     return (
+        # Only WeChat's own page counts: another app (say, opened from a
+        # notification that copies the chat's name) must never receive a reply.
+        capture.current_package in ("", WECHAT_PACKAGE)
         # Search screens (FTSMainUI, web search MMFTSSOSHomeWebViewUI) have a
         # composer-like search box that echoes the chat title.
-        "fts" not in capture.current_activity.rsplit(".", 1)[-1].casefold()
+        and "fts" not in capture.current_activity.rsplit(".", 1)[-1].casefold()
         and not _is_search_page(capture)
         and _find_conversation_tab(capture) is None
         and _find_chat_header(capture, chat) is not None
@@ -760,12 +788,16 @@ def _search_for_chat(
     )
 
 
-def _find_send(capture: CaptureResult) -> Optional[UIElement]:
-    elements = capture.elements
-    labelled = next(
-        (element for element in elements if _label(element).casefold() in _SEND_LABELS),
+def _labelled_send(capture: CaptureResult) -> Optional[UIElement]:
+    return next(
+        (element for element in capture.elements if _label(element).casefold() in _SEND_LABELS),
         None,
     )
+
+
+def _find_send(capture: CaptureResult) -> Optional[UIElement]:
+    elements = capture.elements
+    labelled = _labelled_send(capture)
     if labelled is not None:
         return labelled
 
@@ -788,6 +820,16 @@ def _reply_key(text: str) -> str:
     # Compare letters and digits only, or most such replies read as uncertain.
     decomposed = unicodedata.normalize("NFKD", text)
     return re.sub(r"[\W_]+", "", decomposed).casefold()
+
+
+def _reply_delivered(capture: CaptureResult, text: str) -> bool:
+    """The reply shows as a message and the composer no longer holds it.
+
+    WeChat shows the Send button only while the composer has text, and the
+    composer's position moves with the keyboard, so a draft can read as a
+    visible reply. A labelled Send button means the draft is still unsent.
+    """
+    return _labelled_send(capture) is None and _contains_reply(capture, text)
 
 
 def _contains_reply(capture: CaptureResult, text: str) -> bool:
@@ -952,6 +994,186 @@ def _prepare_text_input(
     return focused
 
 
+# A cold start shows the launcher for ~1.3 s and WeChat's splash for ~2 s before
+# any UI (measured 3.4 s on the 2 GB emulator, whose low-memory killer stops
+# WeChat in the background). Deciding on those frames starts needless recovery.
+_WECHAT_DRAW_SECONDS = 8.0
+
+
+def _has_title_bar(capture: CaptureResult) -> bool:
+    top, bottom = int(capture.height * 0.03), int(capture.height * 0.085)
+    return any(
+        top <= element.bounds[1] < bottom
+        and int(capture.width * 0.25) <= element.center()[0] <= int(capture.width * 0.75)
+        and _label(element).strip()
+        for element in capture.elements
+    )
+
+
+def _wechat_ui_drawn(capture: CaptureResult, chat: str = "") -> bool:
+    """WeChat's own UI is on screen, not the launcher or splash still showing.
+
+    The target's chat-list row also counts: neither of those shows it there.
+    """
+    if capture.current_package and capture.current_package != WECHAT_PACKAGE:
+        return False
+    if chat and _find_chat_header(capture, chat) is not None and _find_input(capture.elements) is None:
+        return False  # the target chat's title bar is painted, its body not yet
+    # Only what WeChat itself draws: the composer region is inferred from the
+    # layout (host_ocr), so it is not evidence that WeChat's UI is on screen.
+    return (_is_conversation_list(capture) or _is_search_page(capture)
+            or _find_conversation_tab(capture) is not None or _has_title_bar(capture)
+            or bool(chat and _find_text(_conversation_rows(capture), chat) is not None))
+
+
+def _wait_until_wechat_drawn(backend: PhoneBackend, capture: CaptureResult,
+                             chat: str = "") -> CaptureResult:
+    deadline = time.monotonic() + _WECHAT_DRAW_SECONDS
+    while not _wechat_ui_drawn(capture, chat) and time.monotonic() < deadline:
+        time.sleep(0.25)
+        try:
+            capture = backend.capture(mode="hierarchy")
+        except Exception as exc:
+            logger.warning("WeChat draw wait capture failed: %s", exc)
+            break
+    return capture
+
+
+# Android's heads-up banner: "<chat> • now" on its first line, near the top.
+_BANNER_SUFFIX = re.compile(r"\s*[•·・]\s*(?:now|\d+\s*m(?:in)?|刚刚|\d+\s*分钟前)?\s*$", re.IGNORECASE)
+
+
+def _notification_banner(capture: CaptureResult, chat: str) -> Optional[UIElement]:
+    """The heads-up banner's title line for *chat*, if one is on screen.
+
+    Only over another app: WeChat in front shows its own in-app banner.
+    """
+    if not capture.elements or capture.current_package == WECHAT_PACKAGE:
+        return None
+    top, bottom = int(capture.height * 0.04), int(capture.height * 0.11)
+    titles = []
+    for element in capture.elements:
+        label = _label(element)
+        if not (top <= element.bounds[1] < bottom and _BANNER_SUFFIX.search(label)):
+            continue
+        title = _BANNER_SUFFIX.sub("", label).strip()
+        if title and not title.endswith(("…", "...")):  # never match a truncated name
+            titles.append(UIElement(index=element.index, class_name=element.class_name,
+                                    text=title, bounds=element.bounds, clickable=True))
+    return _find_text(titles, chat)
+
+
+def _open_from_notification_banner(backend: PhoneBackend, chat: str) -> Optional[CaptureResult]:
+    """Tap the target's heads-up banner; WeChat then opens that chat itself.
+
+    Returns the open chat, or None to fall back to navigating (no banner,
+    an unreadable screen, or a tap that did not open the verified chat).
+    """
+    try:
+        screen = backend.capture(mode="screenshot")
+        if not screen.png_b64 or screen.current_package == WECHAT_PACKAGE:
+            return None
+        screen.elements = recognize_text(screen.png_b64)
+    except Exception as exc:
+        logger.warning("WeChat banner check failed: %s", exc)
+        return None
+    banner = _notification_banner(screen, chat)
+    if banner is None:
+        return None
+    x, y = banner.center()
+    tapped = _run_and_capture(backend, "tap", lambda: backend.tap(x=x, y=y))
+    if tapped.capture is None:
+        return None
+    # Any app can post a notification with the chat's name: accept the result
+    # only when the tap verifiably landed in WeChat itself.
+    def in_wechat_chat(value: CaptureResult) -> bool:
+        return value.current_package == WECHAT_PACKAGE and _chat_is_open(value, chat)
+
+    opened = _settle_capture(backend, tapped.capture, in_wechat_chat,
+                             attempts=0, until=time.monotonic() + _LIST_TAP_REACTION_SECONDS)
+    if in_wechat_chat(opened):
+        logger.info("WeChat opened %r from its notification banner", chat)
+        return opened
+    logger.info("WeChat banner tap did not open %r; navigating instead", chat)
+    return None
+
+
+def _is_other_chat(capture: CaptureResult, chat: str) -> bool:
+    """A conversation page, but not *chat*'s: Back from it lands on the list."""
+    return (
+        capture.current_package in ("", WECHAT_PACKAGE)
+        and _find_input(capture.elements) is not None
+        and _has_title_bar(capture)
+        and _find_chat_header(capture, chat) is None
+        and _find_conversation_tab(capture) is None
+        and not _is_search_page(capture)
+        and "fts" not in capture.current_activity.rsplit(".", 1)[-1].casefold()
+    )
+
+
+def open_visible_chat(backend: PhoneBackend, chat: str) -> ActionResult:
+    """Open *chat* only when it is already open or a row on the chat list.
+
+    For speculative navigation: no Back, swipe or search recovery, so an
+    unexpected screen ends the attempt instead of a run of recovery gestures.
+    Callers that must reach the chat use :func:`open_chat`.
+    """
+    chat = chat.strip()
+
+    def failed(message: str, capture: Optional[CaptureResult] = None) -> ActionResult:
+        return ActionResult(ok=False, action="wechat_open_chat", message=message, capture=capture)
+
+    def opened(capture: CaptureResult) -> ActionResult:
+        return ActionResult(ok=True, action="wechat_open_chat",
+                            message=f"opened WeChat chat {chat!r}", capture=capture)
+
+    if not chat or _EMOJI_PLACEHOLDER.search(chat):
+        return failed("chat is not a plain visible title")
+    # Like a person would: tap the notification and WeChat jumps to the chat.
+    from_banner = _open_from_notification_banner(backend, chat)
+    if from_banner is not None:
+        return opened(from_banner)
+    launch = _run_and_capture(backend, "launch_app", lambda: backend.launch_app(WECHAT_PACKAGE))
+    capture = launch.capture
+    if not launch.ok or capture is None:
+        return failed(launch.message or "could not launch WeChat", capture)
+    # Android reports WeChat while the launcher or splash is still on screen.
+    capture = _wait_until_wechat_drawn(backend, capture, chat)
+    if _chat_is_open(capture, chat):
+        return opened(capture)
+    if not _is_conversation_list(capture):
+        # WeChat resumes where it was left, usually the chat of the previous
+        # reply. Leave a verified chat with Back; a second Back only if the
+        # first merely closed the keyboard. Anything else ends the attempt.
+        for _ in range(2):
+            if not _is_other_chat(capture, chat):
+                break
+            back = _run_and_capture(backend, "keyevent", lambda: backend.keyevent("BACK"))
+            if back.capture is None:
+                return failed(back.message or "Back failed")
+            capture = _wait_until_wechat_drawn(backend, back.capture, chat)
+            if _is_conversation_list(capture):
+                break
+    if not _is_conversation_list(capture):
+        return failed("WeChat is not on the chat list", capture)
+    target = _find_text(_conversation_rows(capture), chat)
+    if target is None:
+        return failed("chat is not a visible chat-list row", capture)
+    tapped = _run_and_capture(backend, "tap", lambda: backend.tap(element=target.index))
+    if tapped.capture is None:
+        return failed(tapped.message or "chat-list tap failed")
+    def done(value: CaptureResult) -> bool:
+        return _chat_is_open(value, chat)
+
+    settled = _settle_capture(backend, tapped.capture, done)  # the chat may still be sliding in
+    # WeChat often ignores the first list tap after a resume; repeat it once,
+    # only while the same list is still on screen.
+    settled = _retap_if_still_on_list(backend, settled, target, done)
+    if done(settled):
+        return opened(settled)
+    return failed("tapping the chat-list row did not open the chat", settled)
+
+
 def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
     """Launch WeChat and open one visible conversation using host OCR."""
     chat = chat.strip()
@@ -971,17 +1193,9 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
             capture=launch.capture,
         )
 
-    capture = launch.capture
-    # Android's launcher command can return before WeChat becomes foreground.
-    # Never run WeChat recovery gestures against a stale Launcher screenshot.
-    for _ in range(3):
-        if not capture.current_package or capture.current_package == WECHAT_PACKAGE:
-            break
-        try:
-            capture = backend.capture(mode="hierarchy")
-        except Exception as exc:
-            logger.warning("WeChat foreground wait capture failed: %s", exc)
-            break
+    # Never run recovery gestures against a launcher or splash frame: Android
+    # reports WeChat in front well before a cold start has drawn any UI.
+    capture = _wait_until_wechat_drawn(backend, launch.capture, chat)
     if capture.current_package and capture.current_package != WECHAT_PACKAGE:
         return ActionResult(
             ok=False, action="wechat_open_chat",
@@ -1007,30 +1221,6 @@ def open_chat(backend: PhoneBackend, chat: str) -> ActionResult:
             message=f"opened WeChat chat {chat!r}",
             capture=capture,
         )
-
-    # A cold/resumed LauncherUI may expose only a handful of OCR elements in
-    # its first frame. Wait for enough structure to identify a chat or list.
-    for _ in range(2):
-        list_elements = _conversation_rows(capture)
-        if input_element is not None or _find_text(list_elements, chat) is not None:
-            break
-        if _is_search_page(capture) or _find_conversation_tab(capture) is not None:
-            break
-        if len(capture.elements) >= 10:
-            break
-        try:
-            capture = backend.capture(mode="hierarchy")
-        except Exception as exc:
-            logger.warning("WeChat launch settle capture failed: %s", exc)
-            break
-        input_element = _find_input(capture.elements)
-        if _chat_is_open(capture, chat):
-            return ActionResult(
-                ok=True,
-                action="wechat_open_chat",
-                message=f"opened WeChat chat {chat!r}",
-                capture=capture,
-            )
 
     # WeChat often exposes a partially rendered chat frame while LauncherUI
     # resumes. Never navigate away from a chat based on that transient title.
@@ -1285,6 +1475,22 @@ _open_reply_chat: Optional[tuple[str, float]] = None
 _OPEN_REPLY_CHAT_TTL = 120.0
 
 
+def remember_open_chat(chat: str) -> tuple[str, float]:
+    """Mark *chat* as open for the next reply; returns the hint as a token."""
+    global _open_reply_chat
+    _open_reply_chat = (_normalize_chat_title(chat), time.monotonic())
+    return _open_reply_chat
+
+
+def forget_open_chat(token: tuple[str, float]) -> bool:
+    """Drop *token* if no reply has used or replaced it; True when dropped."""
+    global _open_reply_chat
+    if _open_reply_chat is not token:
+        return False
+    _open_reply_chat = None
+    return True
+
+
 def _reusable_open_chat(backend: PhoneBackend, chat: str) -> Optional[ActionResult]:
     global _open_reply_chat
     hint, _open_reply_chat = _open_reply_chat, None
@@ -1355,6 +1561,7 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str, *, quote_text: str 
     reply_already_visible = bool(quote_text and _contains_reply(typed.capture, text))
     if on_delivery is not None:
         on_delivery("attempted")  # Commit before issuing the irreversible tap.
+    tapped_at = time.monotonic()
     sent = _run_and_capture(backend, "tap", lambda: backend.tap(element=send.index))
     if not sent.ok or sent.capture is None:
         return ActionResult(
@@ -1369,23 +1576,25 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str, *, quote_text: str 
     # when fresh captures keep showing the Send button: after a real send the
     # draft clears and that button disappears. Use its current coordinates so
     # a refreshed OCR element index cannot point at a different control.
-    if not quote_text and not _contains_reply(sent.capture, text) and _find_send(sent.capture) is not None:
+    if not quote_text and not _reply_delivered(sent.capture, text) and _find_send(sent.capture) is not None:
         sent.capture = _settle_capture(
             backend,
             sent.capture,
             lambda value: (
-                _contains_reply(value, text) or _find_send(value) is None
+                _reply_delivered(value, text) or _find_send(value) is None
             ),
             attempts=2,
+            until=tapped_at + _SEND_REACTION_SECONDS,
         )
         retry_send = _find_send(sent.capture)
-        if not _contains_reply(sent.capture, text) and retry_send is not None:
+        if not _reply_delivered(sent.capture, text) and retry_send is not None:
             retry_x, retry_y = retry_send.center()
             logger.warning(
                 "WeChat Send remained visible after tap; retrying at (%d, %d)",
                 retry_x,
                 retry_y,
             )
+            tapped_at = time.monotonic()
             sent = _run_and_capture(
                 backend,
                 "tap",
@@ -1404,7 +1613,7 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str, *, quote_text: str 
                 )
 
     def delivery_visible(value):
-        if not _contains_reply(value, text):
+        if not _reply_delivered(value, text):
             return False
         if not quote_text:
             return True
@@ -1414,7 +1623,8 @@ def _reply_once(backend: PhoneBackend, chat: str, text: str, *, quote_text: str 
                 and not _quote_preview(value, quote_meta['quote_text'], quote_sender)
                 and _chat_is_open(value, resolved_chat))
 
-    sent.capture = _settle_capture(backend, sent.capture, delivery_visible)
+    sent.capture = _settle_capture(backend, sent.capture, delivery_visible,
+                                   until=tapped_at + _SEND_REACTION_SECONDS)
     if delivery_visible(sent.capture):
         if on_delivery is not None:
             on_delivery("confirmed")
@@ -1493,8 +1703,7 @@ def reply(backend: PhoneBackend, chat: str, text: str, *, quote_text: str = '',
                 )
             if result.ok:
                 if not return_home:
-                    global _open_reply_chat
-                    _open_reply_chat = (_normalize_chat_title(chat), time.monotonic())
+                    remember_open_chat(chat)
                 return result
             if quote_text or result.meta.get("delivery_attempted"):
                 return result
