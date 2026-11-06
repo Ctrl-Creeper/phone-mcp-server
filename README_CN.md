@@ -48,7 +48,7 @@
 
 **可选（适用于无障碍树为空的应用）：**
 - macOS 13+ 和 Xcode Command Line Tools。编译本地 Vision OCR：
-  `mkdir -p ~/.phone-mcp/bin && swiftc phone_control/phone_ocr.swift -o ~/.phone-mcp/bin/phone-ocr -framework Vision -framework ImageIO`
+  `mkdir -p ~/.phone-mcp/bin && swiftc -O phone_control/phone_ocr.swift -o ~/.phone-mcp/bin/phone-ocr -framework Vision -framework ImageIO -framework CoreGraphics`
 
 ## 安装
 
