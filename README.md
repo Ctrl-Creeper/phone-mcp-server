@@ -2,6 +2,8 @@
 
 English | [中文](README_CN.md)
 
+> **Upstream:** [hermes-phone-agent](https://github.com/Ctrl-Creeper/hermes-phone-agent). Its phone-control core (`phone_control/`) is synced from upstream by `scripts/sync_from_hermes.py`, so don't hand-edit those files. The MCP/HTTP server is maintained here.
+
 Standalone MCP + HTTP server for controlling Android phones from **any** AI agent.
 
 Works with Claude Desktop, Claude Code, OpenAI Codex CLI, GPT agents (via OpenAI API), Gemini, LangChain, AutoGen, CrewAI, Open Interpreter, or any HTTP client.

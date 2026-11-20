@@ -2,6 +2,8 @@
 
 [English](README.md) | 中文
 
+> **上游：** [hermes-phone-agent](https://github.com/Ctrl-Creeper/hermes-phone-agent)。其手机控制核心（`phone_control/`）由 `scripts/sync_from_hermes.py` 从上游同步，请勿手工修改这些文件。MCP/HTTP 服务器在本仓库维护。
+
 独立的 MCP + HTTP 服务器，让**任何** AI Agent 都能控制 Android 手机。
 
 支持 Claude Desktop、Claude Code、OpenAI Codex CLI、GPT（通过 OpenAI API）、Gemini、LangChain、AutoGen、CrewAI、Open Interpreter，以及任何 HTTP 客户端。
